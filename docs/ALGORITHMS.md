@@ -1,5 +1,11 @@
 # Algorithms of Tensorbit Core
 
+> **Note:** This file provides a high-level overview. For complete mathematical
+> exposition with derivations, implementation details, and references, see the
+> dedicated documents:
+> - **`docs/EHAP.md`** — Efficient Hessian-Aware Pruning (OBD/OBS framework, Fisher EMA, weight compensation, iterative pruning)
+> - **`docs/CORING.md`** — N:M Structured Sparsity (optimal mask selection, permutation optimization, weight redistribution, GPU kernel design)
+
 ## 1. Problem Statement: Why Structured Pruning Matters for LLM Inference
 
 Modern large language models (LLMs) like Llama 2, Mistral, and GPT-4 contain billions of

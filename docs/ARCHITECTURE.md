@@ -52,7 +52,9 @@ tensorbit-core/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md               # This file
-│   └── ALGORITHMS.md                 # Full mathematical exposition
+│   ├── ALGORITHMS.md                 # High-level algorithm overview
+│   ├── EHAP.md                       # EHAP: complete mathematical exposition
+│   └── CORING.md                     # CORING: complete mathematical exposition
 │
 └── third_party/                      # Reserved for non-vcpkg dependencies
 ```
@@ -466,10 +468,11 @@ diagonal is kept until pruning completes, then freed via `reset()`.
 | P1    | CPU-only build path         | ✅ Done    | TENSORBIT_ENABLE_CUDA=OFF, kernels_stubs.cpp, --skip-gpu flag |
 | P2    | EHAP fisher kernel          | ✅ Done    | `fisher_accumulate_kernel`, `fisher_diagonal_kernel` |
 | P2    | EHAP importance + threshold | ✅ Done    | `ehap_importance_kernel`, `select_pruning_mask` (nth_element) |
-| P2    | CORING 2:4 kernel           | ✅ Done    | Register-only `nm_mask_2_4_kernel`, 0 shared memory |
-| P2    | CORING generic N:M kernel   | ✅ Done    | Shared-memory `nm_mask_generic_kernel` (M ≤ 32, 256B shared) |
-| P2    | Mask application kernel     | ✅ Done    | `apply_mask_kernel` with analytical pruned count |
-| P2    | Device memory management    | ✅ Done    | `cudaMalloc`/`cudaFree`, `to_device()`/`to_host()` |
+| P2    | EHAP importance modes (OBD/OBS/Normalized) | ✅ Done | Multiple score formulations per research literature |
+| P2    | EHAP iterative pruning + compensation | ✅ Done | Cubic schedule (Zhu & Gupta 2017), kBias/kRedist compensation |
+| P2    | CORING optimal mask selection | ✅ Done | kTopN, kOptimal (Gosper's hack), kIterative (swap-refinement) |
+| P2    | CORING weight redistribution | ✅ Done | kProportional (Fisher-weighted), kUniform redistribution |
+| P2    | CORING permutation optimization | ✅ Done | Group-local magnitude sort for improved N:M quality |
 | P3    | Safetensors parser          | 🔜 Planned | Read HuggingFace models for end-to-end CLI pruning |
 | P3    | .tb serialization layer     | 🔜 Planned | `TBWriter`/`TBReader` full implementation |
 | P3    | CLI driver completion       | 🔜 Planned | End-to-end orchestration in main.cpp |
