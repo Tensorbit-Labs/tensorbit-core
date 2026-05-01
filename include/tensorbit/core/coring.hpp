@@ -1,19 +1,21 @@
 #pragma once
 
 /// @file coring.hpp
-/// @brief CORING N:M Structured Sparsity pruner — class skeleton.
+/// @brief CORING N:M Structured Sparsity pruner — full implementation.
 /// @ingroup tensorbit-core
 
+#include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <expected>
-#include <string_view>
+#include <type_traits>
+#include <vector>
 
+#include "tensorbit/core/kernels.hpp"
 #include "tensorbit/core/tensor.hpp"
 
 namespace tensorbit::core {
 
-/// @brief Error codes returned by CORINGPruner operations.
 enum class CORINGError : uint8_t {
     kOk              = 0,
     kShapeMismatch   = 1,
@@ -22,48 +24,16 @@ enum class CORINGError : uint8_t {
     kCudaNotAvailable = 4,
 };
 
-/// @brief Configuration for the CORING N:M pruner.
 struct CORINGConfig {
-    /// Number of elements to keep in each group (N in N:M).
-    int N = 2;
-
-    /// Group size (M in N:M). Must be a power of two and M > N.
-    int M = 4;
-
-    /// If true, use CUDA-accelerated mask generation.
+    int  N = 2;
+    int  M = 4;
     bool use_cuda = true;
 };
 
-// ---------------------------------------------------------------------------
-// CORINGPruner — N:M Structured Sparsity Engine
-// ---------------------------------------------------------------------------
-
-/// @class CORINGPruner
-/// @brief Enforces N:M structured sparsity patterns on weight tensors.
-///
-/// ## N:M Structured Sparsity
-/// For a given N:M pattern (e.g., 2:4), the tensor is divided into contiguous
-/// groups of M elements. Within each group, only the N elements with the
-/// highest importance scores are retained; the remaining M - N are zeroed.
-///
-/// This produces hardware-friendly sparsity that maps directly to the NVIDIA
-/// Ampere Sparse Tensor Core instruction set, delivering up to 2× throughput
-/// on A100 and H100 GPUs.
-///
-/// ## Algorithm Outline
-/// 1. Receive per-weight importance scores from the upstream EHAP pruner.
-/// 2. Partition scores into groups of M consecutive elements.
-/// 3. Within each group, select the top-N elements.
-/// 4. Emit a binary mask (1 = keep, 0 = prune) — typically packed as bits.
-/// 5. Apply the mask to zero out pruned weights.
-///
-/// @tparam F Floating-point precision (float or double).
 template<FloatingPoint F>
 class CORINGPruner {
 public:
-    /// @brief Constructs a CORING pruner with the given N:M configuration.
-    /// @param config Pruner configuration (N, M, CUDA toggle).
-    explicit CORINGPruner(CORINGConfig config);
+    explicit CORINGPruner(CORINGConfig config) : config_(config) {}
 
     ~CORINGPruner() = default;
 
@@ -72,62 +42,164 @@ public:
     CORINGPruner(CORINGPruner&&) noexcept            = default;
     CORINGPruner& operator=(CORINGPruner&&) noexcept = default;
 
-    /// @name Core Pipeline
-    /// @{
-
-    /// @brief Generates an N:M structured-sparsity mask from importance scores.
-    ///
-    /// Groups elements into blocks of M, keeps the top-N highest scores in
-    /// each block, and writes a binary mask.
-    ///
-    /// @param importance Per-weight importance scores.
-    /// @param out_mask   Output mask tensor (uint8, shape == importance shape).
-    ///                   On device if CUDA is enabled.
-    /// @return std::expected with success or CORINGError.
+    // -----------------------------------------------------------------------
+    // generate_nm_mask
+    // -----------------------------------------------------------------------
     auto generate_nm_mask(const TensorDense<F>& importance,
                           TensorDense<uint8_t>& out_mask)
-        -> std::expected<void, CORINGError>;
+        -> Result<void, CORINGError>
+    {
+        if (importance.empty() || out_mask.empty())
+            return unexpected(CORINGError::kZeroSizeTensor);
+        if (importance.size() != out_mask.size())
+            return unexpected(CORINGError::kShapeMismatch);
 
-    /// @brief Applies the N:M mask to zero out pruned weights.
-    ///
-    /// @param weights Weight tensor to prune (modified in-place).
-    /// @param mask    Binary mask tensor (1 = keep).
-    /// @return std::expected with the number of weights zeroed, or CORINGError.
+        auto v = validate_config(importance.size());
+        if (!v) return unexpected(v.error());
+
+        std::size_t Ne = importance.size();
+        int Gn = config_.N;
+        int Gm = config_.M;
+        std::size_t Ng = (Ne / static_cast<std::size_t>(Gm));
+        std::size_t an = Ng * static_cast<std::size_t>(Gm);
+
+        bool gpu_ok = config_.use_cuda
+                      && importance.device() == DeviceLocation::kDevice;
+
+        if constexpr (std::is_same_v<F, float>) {
+            if (gpu_ok) {
+                if (Gn == 2 && Gm == 4)
+                    kernels::launch_nm_mask_2_4(
+                        importance.data(), out_mask.data(), an, nullptr);
+                else
+                    kernels::launch_nm_mask_generic(
+                        importance.data(), out_mask.data(), an, Gn, Gm, nullptr);
+                CUDA_SYNC_CHECK();
+                return {};
+            }
+        }
+
+        // --- CPU path ---
+        const TensorDense<F>* src = &importance;
+        TensorDense<F> hcopy{};
+        if (importance.device() == DeviceLocation::kDevice) {
+            hcopy = importance.to_host();
+            src   = &hcopy;
+            CUDA_SYNC_CHECK();
+        }
+
+        const F* __restrict__ imp  = src->data();
+        uint8_t* __restrict__  msk  = out_mask.data();
+        std::vector<std::pair<F, int>> buf(static_cast<std::size_t>(Gm));
+
+        for (std::size_t g = 0; g < Ng; ++g) {
+            std::size_t base = g * static_cast<std::size_t>(Gm);
+            for (int i = 0; i < Gm; ++i)
+                buf[static_cast<std::size_t>(i)] = {
+                    imp[base + static_cast<std::size_t>(i)], i};
+            std::nth_element(buf.begin(), buf.begin() + Gn, buf.end(),
+                             [](auto& a, auto& b) { return a.first > b.first; });
+            uint8_t byte = 0;
+            for (int k = 0; k < Gn; ++k)
+                byte |= static_cast<uint8_t>(1u << buf[static_cast<std::size_t>(k)].second);
+            msk[g] = byte;
+        }
+        return {};
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_mask
+    // -----------------------------------------------------------------------
     auto apply_mask(TensorDense<F>&            weights,
                     const TensorDense<uint8_t>& mask)
-        -> std::expected<std::size_t, CORINGError>;
+        -> Result<std::size_t, CORINGError>
+    {
+        if (weights.empty() || mask.empty())
+            return unexpected(CORINGError::kZeroSizeTensor);
+        if (weights.size() != mask.size())
+            return unexpected(CORINGError::kShapeMismatch);
 
-    /// @brief Full N:M pruning pass: generates mask from importance, then applies it.
-    ///
-    /// This convenience method chains `generate_nm_mask()` and `apply_mask()`.
-    ///
-    /// @param importance Importance scores.
-    /// @param weights    Weight tensor to prune (modified in-place).
-    /// @return std::expected with the number of weights pruned, or CORINGError.
+        int Gm = config_.M;
+        int Gn = config_.N;
+        std::size_t an = (weights.size() / static_cast<std::size_t>(Gm))
+                         * static_cast<std::size_t>(Gm);
+        bool gpu_ok = config_.use_cuda
+                      && weights.device() == DeviceLocation::kDevice;
+
+        if constexpr (std::is_same_v<F, float>) {
+            if (gpu_ok) {
+                kernels::launch_apply_mask(
+                    weights.data(), mask.data(), an, Gm, nullptr);
+                CUDA_SYNC_CHECK();
+                std::size_t ng = an / static_cast<std::size_t>(Gm);
+                return ng * static_cast<std::size_t>(Gm - Gn);
+            }
+        }
+
+        // --- CPU path ---
+        TensorDense<F> hcopy{};
+        F* w = weights.data();
+        if (weights.device() == DeviceLocation::kDevice) {
+            hcopy = weights.to_host();
+            w     = hcopy.data();
+            CUDA_SYNC_CHECK();
+        }
+
+        const uint8_t* __restrict__ mb = mask.data();
+        std::size_t ng = an / static_cast<std::size_t>(Gm);
+        for (std::size_t g = 0; g < ng; ++g) {
+            uint8_t byte = mb[g];
+            std::size_t base = g * static_cast<std::size_t>(Gm);
+            for (int i = 0; i < Gm; ++i) {
+                if (!((byte >> i) & 1u))
+                    w[base + static_cast<std::size_t>(i)] = static_cast<F>(0);
+            }
+        }
+
+        if (weights.device() == DeviceLocation::kDevice) {
+#ifdef TENSORBIT_ENABLE_CUDA
+            CUDA_CHECK(cudaMemcpy(weights.data(), hcopy.data(),
+                                  weights.size() * sizeof(F),
+                                  cudaMemcpyHostToDevice));
+#endif
+        }
+        return ng * static_cast<std::size_t>(Gm - Gn);
+    }
+
+    // -----------------------------------------------------------------------
+    // prune
+    // -----------------------------------------------------------------------
     auto prune(const TensorDense<F>& importance,
                TensorDense<F>&       weights)
-        -> std::expected<std::size_t, CORINGError>;
-    /// @}
+        -> Result<std::size_t, CORINGError>
+    {
+        if (importance.size() != weights.size())
+            return unexpected(CORINGError::kShapeMismatch);
+        auto shp = std::span(importance.shape().data(), importance.rank());
+        TensorDense<uint8_t> mask(shp, weights.device());
+        auto mr = generate_nm_mask(importance, mask);
+        if (!mr) return unexpected(mr.error());
+        return apply_mask(weights, mask);
+    }
 
-    /// @name Accessors
-    /// @{
-
-    /// @brief Returns the current configuration.
     [[nodiscard]] const CORINGConfig& config() const noexcept { return config_; }
-    /// @}
 
 private:
+    auto validate_config(std::size_t num_elements) -> Result<void, CORINGError> {
+        if (config_.N <= 0 || config_.M <= 0)
+            return unexpected(CORINGError::kInvalidNMConfig);
+        if (config_.N >= config_.M)
+            return unexpected(CORINGError::kInvalidNMConfig);
+        if (!std::has_single_bit(static_cast<unsigned>(config_.M)))
+            return unexpected(CORINGError::kInvalidNMConfig);
+        if (num_elements > 0 &&
+            num_elements % static_cast<std::size_t>(config_.M) != 0) {
+            return unexpected(CORINGError::kShapeMismatch);
+        }
+        return {};
+    }
+
     CORINGConfig config_;
-
-    /// @brief Validates that N, M, and tensor dimensions are compatible.
-    auto validate_config(std::size_t num_elements) -> std::expected<void, CORINGError>;
 };
-
-// =========================================================================
-// Explicit Instantiation Declarations
-// =========================================================================
-
-extern template class CORINGPruner<float>;
-extern template class CORINGPruner<double>;
 
 }  // namespace tensorbit::core

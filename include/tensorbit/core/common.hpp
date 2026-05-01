@@ -7,11 +7,17 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <format>
-#include <fstream>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <source_location>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 // ---------------------------------------------------------------------------
 // CUDA Error-Checking Macros
@@ -140,33 +146,30 @@ public:
     /// @brief Sets the minimum severity level. Messages below this are suppressed.
     void set_level(LogLevel level) { level_ = level; }
 
-    /// @brief Logs a formatted message at the given level.
-    template<typename... Args>
-    void log(LogLevel level,
-             std::format_string<Args...> fmt,
-             Args&&... args,
+    /// @brief Logs a pre-formatted message at the given level.
+    /// Formatting is done by the LOG macros via std::vformat.
+    void log(LogLevel level, std::string_view msg,
              const std::source_location& loc = std::source_location::current()) {
         if (level < level_) return;
         std::lock_guard lock(mutex_);
 
-        auto now   = std::chrono::system_clock::now();
-        auto time  = std::chrono::system_clock::to_time_t(now);
-        auto ms    = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         now.time_since_epoch()) %
-                     1000;
+        auto now  = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        auto ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now.time_since_epoch()) %
+                    1000;
 
+        std::tm tm_buf{};
+        localtime_r(&time, &tm_buf);
         std::array<char, 32> time_buf{};
         std::strftime(time_buf.data(), time_buf.size(),
-                      "%Y-%m-%d %H:%M:%S", std::localtime(&time));
+                      "%Y-%m-%d %H:%M:%S", &tm_buf);
 
-        std::fprintf(stderr, "[%s.%03lld] [%s] ",
+        std::fprintf(stderr, "[%s.%03lld] [%s] %s  (%s:%u)\n",
                      time_buf.data(),
                      static_cast<long long>(ms.count()),
-                     to_string(level).data());
-
-        std::string msg = std::format(fmt, std::forward<Args>(args)...);
-        std::fprintf(stderr, "%s  (%s:%u)\n",
-                     msg.c_str(),
+                     to_string(level).data(),
+                     msg.data(),
                      loc.file_name(),
                      loc.line());
 
@@ -184,29 +187,231 @@ private:
 }  // namespace tensorbit::core
 
 // ---------------------------------------------------------------------------
+// Unexpected<E> — error value wrapper (declared before Result)
+// ---------------------------------------------------------------------------
+
+namespace tensorbit::core {
+
+/// @brief Wraps an error value for use with Result.
+/// Created by the `unexpected()` factory function.
+template<typename E>
+class Unexpected {
+public:
+    template<typename E2 = E>
+    explicit Unexpected(E2&& err) noexcept(std::is_nothrow_constructible_v<E, E2>)
+        : err_(std::forward<E2>(err)) {}
+
+    [[nodiscard]] E& error() & noexcept { return err_; }
+    [[nodiscard]] const E& error() const& noexcept { return err_; }
+    [[nodiscard]] E&& error() && noexcept { return std::move(err_); }
+    [[nodiscard]] const E&& error() const&& noexcept { return std::move(err_); }
+
+private:
+    E err_;
+};
+
+template<typename E>
+Unexpected(E) -> Unexpected<E>;
+
+/// @brief Creates an Unexpected object (analogous to std::unexpected).
+template<typename E>
+[[nodiscard]] Unexpected<std::decay_t<E>> unexpected(E&& err) {
+    return Unexpected<std::decay_t<E>>(std::forward<E>(err));
+}
+
+// ---------------------------------------------------------------------------
+// Result<T, E> — C++20-compatible std::expected replacement
+// ---------------------------------------------------------------------------
+
+/// @brief A C++20-compatible result type modeling success-or-error semantics.
+///
+/// Holds either a value of type T (success) or an error of type E (failure).
+/// Provides `std::expected`-like API for projects targeting C++20 where
+/// `std::expected` is unavailable (it requires C++23).
+///
+/// @tparam T Success value type. May be `void`.
+/// @tparam E Error type. Must be default-constructible.
+template<typename T, typename E>
+class Result {
+public:
+    using value_type = T;
+    using error_type = E;
+
+    // ---- Constructors ----
+
+    /// @brief Constructs from a success value.
+    template<typename U = T>
+    /* implicit */ Result(U&& val) noexcept(std::is_nothrow_constructible_v<T, U>)
+        requires (!std::is_same_v<std::decay_t<U>, Result>)
+        : has_value_(true) {
+        ::new (std::addressof(val_)) T(std::forward<U>(val));
+    }
+
+    /// @brief Constructs from an Unexpected error.
+    template<typename E2>
+    /* implicit */ Result(Unexpected<E2>&& unexp) noexcept(
+        std::is_nothrow_constructible_v<E, E2>)
+        : has_value_(false) {
+        ::new (std::addressof(err_)) E(std::move(unexp).error());
+    }
+
+    Result(const Result&) = delete;
+    Result& operator=(const Result&) = delete;
+
+    Result(Result&& other) noexcept(std::is_nothrow_move_constructible_v<T> &&
+                                    std::is_nothrow_move_constructible_v<E>)
+        : has_value_(other.has_value_) {
+        if (has_value_) {
+            ::new (std::addressof(val_)) T(std::move(other.val_));
+        } else {
+            ::new (std::addressof(err_)) E(std::move(other.err_));
+        }
+    }
+
+    Result& operator=(Result&& other) noexcept(std::is_nothrow_move_assignable_v<T> &&
+                                               std::is_nothrow_move_assignable_v<E>) {
+        if (this == &other) return *this;
+        destroy();
+        has_value_ = other.has_value_;
+        if (has_value_) {
+            ::new (std::addressof(val_)) T(std::move(other.val_));
+        } else {
+            ::new (std::addressof(err_)) E(std::move(other.err_));
+        }
+        return *this;
+    }
+
+    ~Result() { destroy(); }
+
+    // ---- Observers ----
+
+    /// @brief Returns true if the result holds a success value.
+    [[nodiscard]] bool has_value() const noexcept { return has_value_; }
+
+    /// @brief Returns true if it holds a success value.
+    [[nodiscard]] explicit operator bool() const noexcept { return has_value_; }
+
+    /// @brief Accesses the success value. Undefined behavior if !has_value().
+    [[nodiscard]] T& value() noexcept { return val_; }
+    [[nodiscard]] const T& value() const noexcept { return val_; }
+
+    /// @brief Accesses the success value. Returns `default_value` on failure.
+    template<typename U>
+    [[nodiscard]] T value_or(U&& default_value) const& {
+        return has_value_ ? val_ : static_cast<T>(std::forward<U>(default_value));
+    }
+
+    /// @brief Accesses the error value. Undefined behavior if has_value().
+    [[nodiscard]] E& error() noexcept { return err_; }
+    [[nodiscard]] const E& error() const noexcept { return err_; }
+
+    /// @brief Dereference operators for monadic-like access.
+    [[nodiscard]] T& operator*() noexcept { return val_; }
+    [[nodiscard]] const T& operator*() const noexcept { return val_; }
+    [[nodiscard]] T* operator->() noexcept { return std::addressof(val_); }
+    [[nodiscard]] const T* operator->() const noexcept { return std::addressof(val_); }
+
+private:
+    void destroy() {
+        if (has_value_) {
+            val_.~T();
+        } else {
+            err_.~E();
+        }
+    }
+
+    union {
+        T val_;
+        E err_;
+    };
+    bool has_value_;
+};
+
+// void specialization — holds no value, only error state.
+template<typename E>
+class Result<void, E> {
+public:
+    using error_type = E;
+
+    Result() noexcept : has_value_(true) {}
+
+    template<typename E2>
+    /* implicit */ Result(Unexpected<E2>&& unexp) noexcept(
+        std::is_nothrow_constructible_v<E, E2>)
+        : has_value_(false) {
+        ::new (std::addressof(err_)) E(std::move(unexp).error());
+    }
+
+    Result(const Result&) = delete;
+    Result& operator=(const Result&) = delete;
+
+    Result(Result&& other) noexcept(std::is_nothrow_move_constructible_v<E>)
+        : has_value_(other.has_value_) {
+        if (!has_value_) {
+            ::new (std::addressof(err_)) E(std::move(other.err_));
+        }
+    }
+
+    Result& operator=(Result&& other) noexcept(std::is_nothrow_move_assignable_v<E>) {
+        if (this == &other) return *this;
+        if (!has_value_) err_.~E();
+        has_value_ = other.has_value_;
+        if (!has_value_) {
+            ::new (std::addressof(err_)) E(std::move(other.err_));
+        }
+        return *this;
+    }
+
+    ~Result() { if (!has_value_) err_.~E(); }
+
+    [[nodiscard]] bool has_value() const noexcept { return has_value_; }
+    [[nodiscard]] explicit operator bool() const noexcept { return has_value_; }
+    [[nodiscard]] E& error() noexcept { return err_; }
+    [[nodiscard]] const E& error() const noexcept { return err_; }
+
+private:
+    union { E err_; };
+    bool has_value_;
+};
+
+}  // namespace tensorbit::core
+
+// ---------------------------------------------------------------------------
 // Logging Convenience Macros
 // ---------------------------------------------------------------------------
 
-#define TENSORBIT_LOG_TRACE(...)                                                      \
+#define TENSORBIT_LOG_TRACE(fmt, ...)                                                  \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kTrace, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kTrace,                                          \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())
 
-#define TENSORBIT_LOG_DEBUG(...)                                                      \
+#define TENSORBIT_LOG_DEBUG(fmt, ...)                                                  \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kDebug, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kDebug,                                          \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())
 
-#define TENSORBIT_LOG_INFO(...)                                                       \
+#define TENSORBIT_LOG_INFO(fmt, ...)                                                   \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kInfo, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kInfo,                                           \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())
 
-#define TENSORBIT_LOG_WARN(...)                                                       \
+#define TENSORBIT_LOG_WARN(fmt, ...)                                                   \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kWarn, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kWarn,                                           \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())
 
-#define TENSORBIT_LOG_ERROR(...)                                                      \
+#define TENSORBIT_LOG_ERROR(fmt, ...)                                                  \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kError, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kError,                                          \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())
 
-#define TENSORBIT_LOG_FATAL(...)                                                      \
+#define TENSORBIT_LOG_FATAL(fmt, ...)                                                  \
     ::tensorbit::core::Logger::instance().log(                                        \
-        ::tensorbit::core::LogLevel::kFatal, __VA_ARGS__)
+        ::tensorbit::core::LogLevel::kFatal,                                          \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)),                      \
+        std::source_location::current())

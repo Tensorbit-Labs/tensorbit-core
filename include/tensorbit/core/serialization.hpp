@@ -10,11 +10,13 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <fstream>
 #include <span>
 #include <string_view>
 #include <vector>
+
+#include "tensorbit/core/common.hpp"
+#include "tensorbit/core/tensor.hpp"
 
 namespace tensorbit::core {
 
@@ -107,7 +109,7 @@ public:
                std::span<const uint8_t>      masks,
                uint32_t                      nm_n,
                uint32_t                      nm_m)
-        -> std::expected<void, TBError>;
+        -> Result<void, TBError>;
 
     /// @brief Returns the human-readable error message for the last operation.
     [[nodiscard]] std::string_view last_error() const noexcept { return last_error_; }
@@ -143,7 +145,7 @@ public:
     ///
     /// @param path  Path to the .tb file.
     /// @return std::expected with the parsed TBHeader on success, or TBError.
-    auto open(std::string_view path) -> std::expected<TBHeader, TBError>;
+    auto open(std::string_view path) -> Result<TBHeader, TBError>;
 
     /// @brief Reads weight data from the currently open .tb file.
     ///
@@ -151,13 +153,13 @@ public:
     /// @param out_weights Destination buffer (must be pre-sized).
     /// @return std::expected with success or TBError.
     template<FloatingPoint F>
-    auto read_weights(std::span<F> out_weights) -> std::expected<void, TBError>;
+    auto read_weights(std::span<F> out_weights) -> Result<void, TBError>;
 
     /// @brief Reads mask data from the currently open .tb file.
     ///
     /// @param out_masks Destination buffer (must be pre-sized).
     /// @return std::expected with success or TBError.
-    auto read_masks(std::span<uint8_t> out_masks) -> std::expected<void, TBError>;
+    auto read_masks(std::span<uint8_t> out_masks) -> Result<void, TBError>;
 
     /// @brief Closes the currently open file.
     void close();

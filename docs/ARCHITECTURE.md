@@ -6,49 +6,53 @@
 Hessian-aware structured pruning. It is stage one of the Tensorbit Labs
 P-D-Q pipeline (Prune → Distill → Quantize).
 
+> **C++20 Strict:** This project targets C++20 only. `std::expected` (C++23),
+> `std::format_string` (C++23), and `std::print` (C++23) are intentionally
+> avoided. A custom `Result<T,E>` replaces `std::expected`, and `std::vformat`
+> with `std::make_format_args` (both C++20) handles message formatting.
+
 ---
 
 ## Directory Layout
 
 ```
 tensorbit-core/
-├── CMakeLists.txt                    # Build system (CUDA 12 SM80/SM90, Eigen3, C++20)
+├── CMakeLists.txt                    # Build system (TENSORBIT_ENABLE_CUDA option)
 ├── .clang-format                     # C++20 code style (Google-based, 4-space indent)
 ├── .gitignore                        # Build artifacts, logs, .tb files, model weights
 ├── README.md                         # Project overview and usage
-├── format.sh                         # Clang-format runner
+├── format.sh                         # Clang-format runner (prerequisite check)
+├── verify_ubuntu.sh                  # WSL/Ubuntu environment diagnostic tool
 │
 ├── include/
 │   └── tensorbit/
 │       └── core/
-│           ├── common.hpp            # CUDA_CHECK, TENSORBIT_CHECK, thread-safe Logger
-│           ├── tensor.hpp            # TensorDense<F>, FloatingPoint/TensorType concepts
-│           │                          #   Host/device allocation, to_device(), to_host()
-│           ├── ehap.hpp              # EHAPPruner<F> — Hessian-aware importance scoring
-│           ├── coring.hpp            # CORINGPruner<F> — N:M structured sparsity
-│           ├── kernels.hpp           # CUDA kernel launch declarations (7 launches)
+│           ├── common.hpp            # CUDA_CHECK, TENSORBIT_CHECK, Logger, Result<T,E>
+│           ├── tensor.hpp            # TensorDense<T>, FloatingPoint/TensorType concepts
+│           │                          #   to_device()/to_host() transfer, host/device alloc
+│           ├── ehap.hpp              # EHAPPruner<F> — ALL implementations inline
+│           ├── coring.hpp            # CORINGPruner<F> — ALL implementations inline
+│           ├── kernels.hpp           # CUDA kernel launch declarations (6 functions)
 │           └── serialization.hpp     # TBWriter/TBReader — .tb binary format (stubs)
 │
 ├── src/
 │   ├── main.cpp                      # CLI entry point (`tb-prune`) with std::span
-│   ├── ehap.cpp                      # EHAPPruner<float>/<double> full implementation
-│   │                                  #   GPU/CPU dispatch for accumulate, importance, threshold
-│   ├── coring.cpp                    # CORINGPruner<float>/<double> full implementation
-│   │                                  #   GPU 2:4/generic paths, CPU fallback, analytical counts
-│   └── kernels.cu                    # 6 CUDA kernels: fisher_diagonal, fisher_accumulate,
-│                                      #   ehap_importance, nm_mask_2_4, nm_mask_generic, apply_mask
+│   ├── ehap.cpp                      # Explicit template instantiations only
+│   ├── coring.cpp                    # Explicit template instantiations only
+│   ├── kernels.cu                    # 6 CUDA kernels (compiled when CUDA enabled)
+│   └── kernels_stubs.cpp             # No-op stubs for CPU-only builds
 ├── tests/
 │   ├── test_ehap.cpp                 # EHAP pruner unit tests (7 cases)
 │   ├── test_coring.cpp               # CORING pruner unit tests (7 cases)
-│   └── test_all.sh                   # Test runner (CMake ctest wrapper)
+│   └── test_all.sh                   # Test runner (prereq checks, --skip-gpu, --clean)
 │
 ├── scripts/
-│   ├── setup_cloud.sh                # Ubuntu 22.04 provisioning (CUDA 12, Eigen3, Python)
+│   ├── setup_cloud.sh                # Ubuntu 22.04 provisioning (CUDA 12, Eigen3)
 │   └── download_model.py             # HuggingFace .safetensors downloader
 │
 ├── docs/
 │   ├── ARCHITECTURE.md               # This file
-│   └── ALGORITHMS.md                 # Full mathematical exposition (Taylor, Fisher, roofline)
+│   └── ALGORITHMS.md                 # Full mathematical exposition
 │
 └── third_party/                      # Reserved for non-vcpkg dependencies
 ```
@@ -110,13 +114,68 @@ concept TensorType = requires(T t) {
 };
 ```
 
-All pruner templates (`EHAPPruner<F>`, `CORINGPruner<F>`) are constrained by
-`FloatingPoint<F>`, preventing accidental instantiation with integer or complex
-types. The `TensorType` concept defines the minimum contract any tensor class
-must satisfy to interoperate with the pruning pipeline — enabling future
-zero-copy wrappers around PyTorch tensors or NumPy arrays.
+The `FloatingPoint` concept constrains pruner templates (`EHAPPruner<F>`,
+`CORINGPruner<F>`). `TensorDense<T>` is unconstrained — it accepts any scalar
+type including `uint8_t` for mask tensors.
 
-### 2. TensorDense<F> — Dual Device Memory Management
+### 2. Result<T,E> — C++20 std::expected Replacement
+
+`std::expected` is a C++23 type, unavailable in C++20 mode. A custom `Result<T,E>`
+class (union-based, 175 lines in `common.hpp`) provides the same API:
+
+```
+Result<T, E>        // disc union of T/E with has_value_ flag
+Result<void, E>     // specialization for error-only results
+Unexpected<E>       // error wrapper (analogous to std::unexpected)
+unexpected(e)       // factory function returning Unexpected<decay_t<E>>
+```
+
+All pruner methods return `Result<void, ErrorEnum>` or `Result<std::size_t, ErrorEnum>`.
+Error propagation: `if (!result) return unexpected(result.error());`
+
+### 3. Inline Implementation Pattern
+
+All pruner member functions are defined **inline in the headers** (`ehap.hpp`,
+`coring.hpp`). The `.cpp` files (`ehap.cpp`, `coring.cpp`) contain only
+explicit template instantiations:
+
+```cpp
+template class EHAPPruner<float>;
+template class EHAPPruner<double>;
+```
+
+This avoids the brittle `extern template class` + explicit specialization
+pattern, which fails when inline methods in the class body trigger eager
+implicit instantiation in GCC.
+
+### 4. Logger Design — Non-Template with Macros
+
+The `Logger::log()` method has a simple signature:
+
+```cpp
+void log(LogLevel level, std::string_view msg,
+         const std::source_location& loc = std::source_location::current());
+```
+
+All formatting happens at each LOG macro site via `std::vformat` +
+`std::make_format_args` (both C++20):
+
+```cpp
+#define TENSORBIT_LOG_INFO(fmt, ...) \
+    Logger::instance().log(LogLevel::kInfo, \
+        std::vformat((fmt), std::make_format_args(__VA_ARGS__)), \
+        std::source_location::current())
+```
+
+This avoids the template deduction failure that occurs when a variadic
+parameter pack is followed by a defaulted `std::source_location` parameter.
+It also avoids `std::format_string` (C++23).
+
+**Critical constraint:** `std::make_format_args(_Args&...)` only accepts
+lvalue references. All format arguments must be named variables, not
+temporary expressions (no literals, no ternary results).
+
+### 5. Diagonal Fisher Approximation — O(N) Memory
 
 The `TensorDense<F>` class owns its buffer on either host or device through a
 `std::unique_ptr<F[], void(*)(F*)>` with compile-time selectable deleters:
@@ -294,7 +353,7 @@ accordingly (2 or 4 bytes per group respectively). The `.tb` reader uses
 | `fisher_accumulate_kernel` | ⌈N/256⌉ | 256 | 0 B | 2 FLOP/elem | Memory (HBM) |
 | `ehap_importance_kernel` | ⌈N/256⌉ | 256 | 0 B | 3 FLOP/elem | Memory (HBM) |
 | `nm_mask_2_4_kernel` | ⌈N₄/256⌉ | 256 | 0 B | 4 FLOP/elem | Compute (ALU) |
-| `nm_mask_generic_kernel` | N/M | M | ~128 B | O(M²)/elem | Compute (ALU) |
+| `nm_mask_generic_kernel` | N/M | M | 256 B | O(M²)/elem | Compute (ALU) |
 | `apply_mask_kernel` | ⌈N/256⌉ | 256 | 0 B | 0 FLOP/elem | Memory (HBM) |
 
 All grid/block dimensions are computed by host launch wrappers in
@@ -403,19 +462,22 @@ diagonal is kept until pruning completes, then freed via `reset()`.
 | Phase | Component                   | Status     | Notes |
 |-------|-----------------------------|------------|-------|
 | P1    | Boilerplate + build system  | ✅ Done    | CMake, headers, CLI, Logger, tests |
+| P1    | C++20 compat audit          | ✅ Done    | std::expected→Result, format_string→vformat, lvalue constraint documented |
+| P1    | CPU-only build path         | ✅ Done    | TENSORBIT_ENABLE_CUDA=OFF, kernels_stubs.cpp, --skip-gpu flag |
 | P2    | EHAP fisher kernel          | ✅ Done    | `fisher_accumulate_kernel`, `fisher_diagonal_kernel` |
-| P2    | EHAP importance + threshold | ✅ Done    | `ehap_importance_kernel`, `select_pruning_mask` |
-| P2    | CORING 2:4 kernel           | ✅ Done    | Warp-local register-only `nm_mask_2_4_kernel` |
-| P2    | CORING generic N:M kernel   | ✅ Done    | Shared-memory `nm_mask_generic_kernel` (M ≤ 32) |
+| P2    | EHAP importance + threshold | ✅ Done    | `ehap_importance_kernel`, `select_pruning_mask` (nth_element) |
+| P2    | CORING 2:4 kernel           | ✅ Done    | Register-only `nm_mask_2_4_kernel`, 0 shared memory |
+| P2    | CORING generic N:M kernel   | ✅ Done    | Shared-memory `nm_mask_generic_kernel` (M ≤ 32, 256B shared) |
 | P2    | Mask application kernel     | ✅ Done    | `apply_mask_kernel` with analytical pruned count |
 | P2    | Device memory management    | ✅ Done    | `cudaMalloc`/`cudaFree`, `to_device()`/`to_host()` |
 | P3    | Safetensors parser          | 🔜 Planned | Read HuggingFace models for end-to-end CLI pruning |
 | P3    | .tb serialization layer     | 🔜 Planned | `TBWriter`/`TBReader` full implementation |
-| P3    | Multi-stream parallelism    | 🔜 Planned | CUDA stream pools for concurrent layer processing |
-| P3    | FP16/BF16 precision         | 🔜 Planned | `__half`/`__nv_bfloat16` kernels for reduced memory |
+| P3    | CLI driver completion       | 🔜 Planned | End-to-end orchestration in main.cpp |
+| P3    | std::filesystem integration | 🔜 Planned | D: drive space checks, model path management |
+| P4    | Multi-stream parallelism    | 🔜 Planned | CUDA stream pools for concurrent layer processing |
+| P4    | FP16/BF16 precision         | 🔜 Planned | `__half`/`__nv_bfloat16` kernels for reduced memory |
 | P4    | cuSPARSELt integration      | 🔜 Planned | Direct 2:4 matmul via `cusparseLtMatmul()` |
 | P4    | Inference runtime           | 🔜 Planned | Standalone .tb loader + sparse GEMM executor |
-| P4    | Multi-GPU sharding          | 🔜 Planned | NCCL all-reduce for distributed Fisher accumulation |
 
 ---
 

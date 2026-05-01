@@ -7,7 +7,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <vector>
 
 #include "tensorbit/core/common.hpp"
 #include "tensorbit/core/ehap.hpp"
@@ -80,9 +79,9 @@ TEST(EHAPPruner_Reset) {
     EHAPPruner<float> pruner(cfg);
 
     // Simulate partial state
-    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
     std::size_t shape_arr[] = {4};
-    TensorDense<float> grad(data.data(), std::span<const std::size_t>(shape_arr, 1));
+    TensorDense<float> grad(std::span<const std::size_t>(shape_arr, 1));
+    grad[0] = 1.0f; grad[1] = 2.0f; grad[2] = 3.0f; grad[3] = 4.0f;
 
     auto result = pruner.accumulate_fisher(grad, 1.0f);
     EXPECT_TRUE(result.has_value());
@@ -119,13 +118,13 @@ TEST(EHAPPruner_ComputeImportance_ShapeMismatch) {
     EHAPConfig cfg;
     EHAPPruner<float> pruner(cfg);
 
-    std::vector<float> data_a = {1.0f, 2.0f, 3.0f};
-    std::vector<float> data_b = {1.0f, 2.0f};
     std::size_t shape_a[] = {3};
     std::size_t shape_b[] = {2};
 
-    TensorDense<float> weights(data_a.data(), std::span<const std::size_t>(shape_a, 1));
-    TensorDense<float> importance(data_b.data(), std::span<const std::size_t>(shape_b, 1));
+    TensorDense<float> weights(std::span<const std::size_t>(shape_a, 1));
+    TensorDense<float> importance(std::span<const std::size_t>(shape_b, 1));
+    weights[0] = 1.0f; weights[1] = 2.0f; weights[2] = 3.0f;
+    importance[0] = 1.0f; importance[1] = 2.0f;
 
     auto result = pruner.compute_importance(weights, importance);
     EXPECT_FALSE(result.has_value());

@@ -99,7 +99,7 @@ For each batch:
 ```
 
 This is an exponential running average with decay controlled by `accumulation_steps`.
-The implementation in `src/ehap.cpp::accumulate_fisher()` supports both:
+The implementation in `include/tensorbit/core/ehap.hpp` (EHAPPruner<F>::accumulate_fisher) supports both:
 
 - **GPU path**: Launches `fisher_accumulate_kernel` (1 thread per element, `fmaf`
   fused multiply-add for precision).
@@ -175,7 +175,7 @@ The generic kernel (`nm_mask_generic_kernel`) handles arbitrary N:M patterns for
 
 | Threads per block | Shared memory | Per-thread work | Time complexity |
 |-------------------|---------------|-----------------|-----------------|
-| M (up to 32) | ~128 bytes | Rank computation | O(M^2) |
+| M (up to 32) | ~256 bytes (32×float + 32×int) | Rank computation | O(M^2) |
 
 Algorithm:
 1. Each of M threads loads one importance value into `__shared__ float s_vals[M]`.
@@ -288,7 +288,7 @@ they don't compete with weight I/O for HBM bandwidth during the pruning phase.
 
 | Kernel | Shared Memory/Block | Max Blocks/SM (A100, 164 KB L1/SHMEM) |
 |--------|--------------------|--------------------------------------|
-| nm_mask_generic | 128 bytes | 256+ (not a limiting factor) |
+| nm_mask_generic | 256 bytes (s_vals[32] + s_ranks[32]) | 256+ (not a limiting factor) |
 | All others | 0 bytes | Limited by registers/threadblocks only |
 
 ---

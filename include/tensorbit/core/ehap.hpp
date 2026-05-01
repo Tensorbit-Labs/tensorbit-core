@@ -1,18 +1,20 @@
 #pragma once
 
 /// @file ehap.hpp
-/// @brief Efficient Hessian-Aware Pruning (EHAP) — pruner class skeleton.
+/// @brief Efficient Hessian-Aware Pruning (EHAP) — full implementation.
 /// @ingroup tensorbit-core
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
-#include <expected>
-#include <string_view>
+#include <type_traits>
+#include <vector>
 
+#include "tensorbit/core/kernels.hpp"
 #include "tensorbit/core/tensor.hpp"
 
 namespace tensorbit::core {
 
-/// @brief Error codes returned by EHAPPruner operations.
 enum class EHAPError : uint8_t {
     kOk                = 0,
     kShapeMismatch     = 1,
@@ -21,52 +23,17 @@ enum class EHAPError : uint8_t {
     kCudaNotAvailable  = 4,
 };
 
-/// @brief Configuration for the EHAP pruner.
 struct EHAPConfig {
-    /// Damping term added to the Fisher diagonal for numerical stability.
-    float damping = 0.01f;
-
-    /// If true, uses the diagonal Fisher Information approximation (O(N) memory).
-    /// If false, falls back to magnitude-based pruning.
-    bool use_diagonal_fisher = true;
-
-    /// Target sparsity ratio (fraction of weights to retain, 0.0–1.0).
-    float sparsity_ratio = 0.5f;
-
-    /// Number of gradient accumulation steps before recomputing importance.
+    float       damping = 0.01f;
+    bool        use_diagonal_fisher = true;
+    float       sparsity_ratio = 0.5f;
     std::size_t accumulation_steps = 100;
 };
 
-// ---------------------------------------------------------------------------
-// EHAPPruner — Efficient Hessian-Aware Pruning Engine
-// ---------------------------------------------------------------------------
-
-/// @class EHAPPruner
-/// @brief Computes per-weight importance scores using a diagonal Fisher
-/// Information approximation and selects weights for removal.
-///
-/// ## Mathematical Foundation
-/// The EHAP objective approximates the loss landscape curvature around
-/// weight @f$ w_i @f$ using the diagonal of the Fisher Information Matrix:
-/// @f[
-///   F_{ii} = \mathbb{E}_{x \sim D} \left[ \left( \frac{\partial \mathcal{L}}{\partial w_i} \right)^2 \right]
-/// @f]
-///
-/// The sensitivity score for weight @f$ w_i @f$ is then:
-/// @f[
-///   s_i = w_i^2 \cdot (F_{ii} + \lambda)
-/// @f]
-/// where @f$ \lambda @f$ is a damping factor.
-///
-/// Weights with the lowest scores are pruned.
-///
-/// @tparam F Floating-point precision (float or double).
 template<FloatingPoint F>
 class EHAPPruner {
 public:
-    /// @brief Constructs an EHAP pruner with the given configuration.
-    /// @param config Pruner configuration (damping, fisher mode, sparsity).
-    explicit EHAPPruner(EHAPConfig config);
+    explicit EHAPPruner(EHAPConfig config) : config_(config) {}
 
     ~EHAPPruner() = default;
 
@@ -75,66 +42,144 @@ public:
     EHAPPruner(EHAPPruner&&) noexcept            = default;
     EHAPPruner& operator=(EHAPPruner&&) noexcept = default;
 
-    /// @name Core Pipeline
-    /// @{
-
-    /// @brief Accumulates gradients into the Fisher diagonal buffer.
-    ///
-    /// Call this every backward pass. The Fisher diagonal is updated:
-    /// @f$ F_{ii} \leftarrow F_{ii} + \alpha \cdot g_i^2 @f$
-    ///
-    /// @param gradients Gradient tensor matching the weight shape.
-    /// @param alpha     Scaling factor (typically 1.0 / batch_size).
-    /// @return std::expected with success or EHAPError.
+    // -----------------------------------------------------------------------
+    // accumulate_fisher
+    // -----------------------------------------------------------------------
     auto accumulate_fisher(const TensorDense<F>& gradients, F alpha)
-        -> std::expected<void, EHAPError>;
+        -> Result<void, EHAPError>
+    {
+        if (gradients.empty())
+            return unexpected(EHAPError::kZeroSizeTensor);
 
-    /// @brief Computes importance scores from the accumulated Fisher diagonal
-    /// and current weight magnitudes.
-    ///
-    /// @param weights Current weight tensor.
-    /// @param out_importance Output tensor (same shape as weights) receiving importance scores.
-    /// @return std::expected with success or EHAPError.
-    auto compute_importance(const TensorDense<F>& weights,
-                            TensorDense<F>&       out_importance)
-        -> std::expected<void, EHAPError>;
+        if (fisher_diag_.empty()) {
+            auto shp = std::span(gradients.shape().data(), gradients.rank());
+            fisher_diag_ = TensorDense<F>(shp, gradients.device());
+        }
 
-    /// @brief Selects weights to prune based on importance scores and the target sparsity.
-    ///
-    /// @param importance Importance score tensor.
-    /// @param out_mask   Output binary mask tensor (1 = keep, 0 = prune).
-    /// @return std::expected with the number of pruned weights on success, or EHAPError.
-    auto select_pruning_mask(const TensorDense<F>& importance,
-                             TensorDense<uint8_t>& out_mask)
-        -> std::expected<std::size_t, EHAPError>;
-    /// @}
+        if (fisher_diag_.size() != gradients.size())
+            return unexpected(EHAPError::kShapeMismatch);
 
-    /// @name Accessors
-    /// @{
+        if (!config_.use_diagonal_fisher)
+            return {};
 
-    /// @brief Returns the current configuration (read-only).
-    [[nodiscard]] const EHAPConfig& config() const noexcept { return config_; }
+        if constexpr (std::is_same_v<F, float>) {
+            if (gradients.device() == DeviceLocation::kDevice) {
+                kernels::launch_fisher_accumulate(
+                    fisher_diag_.data(), gradients.data(),
+                    gradients.size(), alpha, nullptr);
+                CUDA_SYNC_CHECK();
+                return {};
+            }
+        }
 
-    /// @brief Returns the accumulated Fisher diagonal buffer.
-    /// Empty tensor if accumulation has not started.
-    [[nodiscard]] const TensorDense<F>& fisher_diagonal() const noexcept {
-        return fisher_diag_;
+        // --- CPU path ---
+        F* __restrict__       fo = fisher_diag_.data();
+        const F* __restrict__ gi = gradients.data();
+        std::size_t           N  = gradients.size();
+        for (std::size_t i = 0; i < N; ++i)
+            fo[i] += alpha * gi[i] * gi[i];
+        return {};
     }
 
-    /// @brief Resets the internal Fisher accumulator.
+    // -----------------------------------------------------------------------
+    // compute_importance
+    // -----------------------------------------------------------------------
+    auto compute_importance(const TensorDense<F>& weights,
+                            TensorDense<F>&       out_importance)
+        -> Result<void, EHAPError>
+    {
+        if (weights.empty() || out_importance.empty())
+            return unexpected(EHAPError::kZeroSizeTensor);
+        if (weights.size() != out_importance.size())
+            return unexpected(EHAPError::kShapeMismatch);
+
+        std::size_t N = weights.size();
+        F damp = static_cast<F>(config_.damping);
+
+        if constexpr (std::is_same_v<F, float>) {
+            if (weights.device() == DeviceLocation::kDevice) {
+                const float* fp = nullptr;
+                if (config_.use_diagonal_fisher && !fisher_diag_.empty())
+                    fp = fisher_diag_.data();
+                kernels::launch_ehap_importance(
+                    weights.data(), fp, out_importance.data(),
+                    N, config_.damping, nullptr);
+                CUDA_SYNC_CHECK();
+                return {};
+            }
+        }
+
+        // --- CPU path ---
+        const F* __restrict__ wi = weights.data();
+        F* __restrict__       so = out_importance.data();
+        bool have_f = config_.use_diagonal_fisher && !fisher_diag_.empty();
+
+        if (have_f) {
+            const F* __restrict__ fi = fisher_diag_.data();
+            for (std::size_t i = 0; i < N; ++i) {
+                F w = wi[i];
+                so[i] = w * w * (fi[i] + damp);
+            }
+        } else {
+            for (std::size_t i = 0; i < N; ++i) {
+                F w = wi[i];
+                so[i] = w * w;
+            }
+        }
+        return {};
+    }
+
+    // -----------------------------------------------------------------------
+    // select_pruning_mask
+    // -----------------------------------------------------------------------
+    auto select_pruning_mask(const TensorDense<F>& importance,
+                             TensorDense<uint8_t>& out_mask)
+        -> Result<std::size_t, EHAPError>
+    {
+        if (importance.empty() || out_mask.empty())
+            return unexpected(EHAPError::kZeroSizeTensor);
+        if (importance.size() != out_mask.size())
+            return unexpected(EHAPError::kShapeMismatch);
+        if (importance.device() != DeviceLocation::kHost)
+            return unexpected(EHAPError::kCudaNotAvailable);
+
+        float sp = config_.sparsity_ratio;
+        if (sp <= 0.0f || sp >= 1.0f)
+            return unexpected(EHAPError::kInvalidConfig);
+
+        std::size_t N = importance.size();
+        std::size_t keep = static_cast<std::size_t>(sp * static_cast<float>(N));
+        if (keep == 0) keep = 1;
+        if (keep >= N) {
+            std::fill_n(out_mask.data(), N, static_cast<uint8_t>(1));
+            return std::size_t{0};
+        }
+
+        std::vector<F> copy(importance.data(), importance.data() + N);
+        std::size_t tidx = N - keep;
+        std::nth_element(copy.begin(),
+                         copy.begin() + static_cast<std::ptrdiff_t>(tidx),
+                         copy.end());
+        F thr = copy[tidx];
+
+        std::size_t pruned = 0;
+        uint8_t* __restrict__ mo = out_mask.data();
+        const F* __restrict__  im = importance.data();
+        for (std::size_t i = 0; i < N; ++i) {
+            bool k = (im[i] >= thr);
+            mo[i] = k ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+            if (!k) ++pruned;
+        }
+        return pruned;
+    }
+
+    [[nodiscard]] const EHAPConfig& config() const noexcept { return config_; }
+    [[nodiscard]] const TensorDense<F>& fisher_diagonal() const noexcept { return fisher_diag_; }
     void reset() { fisher_diag_ = TensorDense<F>{}; }
-    /// @}
 
 private:
     EHAPConfig    config_;
-    TensorDense<F> fisher_diag_;  ///< Accumulated diagonal of Fisher Information Matrix.
+    TensorDense<F> fisher_diag_;
 };
-
-// =========================================================================
-// Explicit Instantiation Declarations
-// =========================================================================
-
-extern template class EHAPPruner<float>;
-extern template class EHAPPruner<double>;
 
 }  // namespace tensorbit::core

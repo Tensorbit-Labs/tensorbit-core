@@ -1,9 +1,28 @@
 cmake_minimum_required(VERSION 3.22)
-project(tensorbit-core
-    VERSION 0.1.0
-    DESCRIPTION "High-performance C++20/CUDA backbone for Hessian-aware structured pruning"
-    LANGUAGES CXX CUDA
-)
+
+# Suppress CMP0144 warning (EIGEN3_ROOT vs Eigen3_ROOT)
+cmake_policy(SET CMP0144 OLD)
+
+# -----------------------------------------------------------------------------
+# Project Identity
+# -----------------------------------------------------------------------------
+# CUDA is opt-in: set TENSORBIT_ENABLE_CUDA=OFF for CPU-only host builds
+# (e.g., laptops without NVIDIA GPUs, CI runners, WSL without GPU passthrough).
+option(TENSORBIT_ENABLE_CUDA "Build with CUDA 12 GPU acceleration" ON)
+
+if(TENSORBIT_ENABLE_CUDA)
+    project(tensorbit-core
+        VERSION 0.1.0
+        DESCRIPTION "High-performance C++20/CUDA backbone for Hessian-aware structured pruning"
+        LANGUAGES CXX CUDA
+    )
+else()
+    project(tensorbit-core
+        VERSION 0.1.0
+        DESCRIPTION "High-performance C++20/CUDA backbone for Hessian-aware structured pruning"
+        LANGUAGES CXX
+    )
+endif()
 
 # -----------------------------------------------------------------------------
 # C++20 Standard Configuration
@@ -14,26 +33,55 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# CUDA 12 Configuration
+# CUDA Configuration (only when enabled)
 # -----------------------------------------------------------------------------
-set(CMAKE_CUDA_STANDARD 20)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+if(TENSORBIT_ENABLE_CUDA)
+    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
-# Target NVIDIA A100 (SM80) and H100 (SM90)
-set(CMAKE_CUDA_ARCHITECTURES "80;90")
+    # Target NVIDIA A100 (SM80) and H100 (SM90)
+    set(CMAKE_CUDA_ARCHITECTURES "80;90")
 
-# Required: CUDA Toolkit >= 12.0
-find_package(CUDAToolkit 12.0 REQUIRED)
+    # Required: CUDA Toolkit >= 12.0
+    find_package(CUDAToolkit 12.0 REQUIRED)
+endif()
 
 # -----------------------------------------------------------------------------
 # External Dependencies
 # -----------------------------------------------------------------------------
-# Eigen3 — header-only linear algebra
-# Provide -DEIGEN3_ROOT=D:/eigen3 if not on a standard path
-find_package(Eigen3 REQUIRED NO_MODULE)
+# Eigen3 — header-only linear algebra.
+# On Ubuntu/WSL:  sudo apt install libeigen3-dev
+# On Windows:     git clone https://gitlab.com/libeigen/eigen.git D:/eigen3
+# Custom path:    cmake .. -DEIGEN3_ROOT=/path/to/eigen3
+#
+# Eigen3 ships Eigen3Config.cmake only on recent versions.
+# For older installs or custom paths, we fall back to find_path.
+find_package(Eigen3 QUIET)
 if(NOT Eigen3_FOUND)
-    message(FATAL_ERROR "Eigen3 not found. Install it with: vcpkg install eigen3")
+    find_path(EIGEN3_INCLUDE_DIR Eigen/Core
+        HINTS ${EIGEN3_ROOT}
+        PATHS
+            /usr/include/eigen3
+            /usr/local/include/eigen3
+            /usr/include
+            /usr/local/include
+            D:/eigen3
+    )
+    if(EIGEN3_INCLUDE_DIR)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED)
+        set_target_properties(Eigen3::Eigen PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${EIGEN3_INCLUDE_DIR}")
+        message(STATUS "Eigen3 found (fallback): ${EIGEN3_INCLUDE_DIR}")
+    else()
+        message(FATAL_ERROR
+            "Eigen3 not found.\n"
+            "  Ubuntu/WSL:  sudo apt install libeigen3-dev\n"
+            "  Windows:     git clone https://gitlab.com/libeigen/eigen.git D:/eigen3\n"
+            "  Custom path: cmake .. -DEIGEN3_ROOT=/path/to/eigen3")
+    endif()
+else()
+    message(STATUS "Eigen3 found: ${EIGEN3_INCLUDE_DIR}")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -72,7 +120,7 @@ set(CORE_CUDA_SOURCES
 )
 
 # -----------------------------------------------------------------------------
-# Library Target: tensorbit-core (shared C++ logic)
+# Library Target: tensorbit-core (host C++ logic)
 # -----------------------------------------------------------------------------
 add_library(tensorbit-core STATIC
     ${CORE_HEADERS}
@@ -90,29 +138,40 @@ target_link_libraries(tensorbit-core
         Eigen3::Eigen
 )
 
+# When CUDA is enabled, define TENSORBIT_ENABLE_CUDA so that tensor.hpp
+# conditionally includes <cuda_runtime.h> and activates CUDA_CHECK macros.
+# When CUDA is disabled, kernel launch stubs are compiled instead.
+if(TENSORBIT_ENABLE_CUDA)
+    target_compile_definitions(tensorbit-core PUBLIC TENSORBIT_ENABLE_CUDA)
+else()
+    target_sources(tensorbit-core PRIVATE src/kernels_stubs.cpp)
+endif()
+
 # -----------------------------------------------------------------------------
-# Library Target: tensorbit-core-cuda (CUDA kernels)
+# Library Target: tensorbit-core-cuda (CUDA kernels) — only when CUDA enabled
 # -----------------------------------------------------------------------------
-add_library(tensorbit-core-cuda STATIC
-    ${CORE_CUDA_SOURCES}
-)
+if(TENSORBIT_ENABLE_CUDA)
+    add_library(tensorbit-core-cuda STATIC
+        ${CORE_CUDA_SOURCES}
+    )
 
-target_include_directories(tensorbit-core-cuda
-    PRIVATE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-)
+    target_include_directories(tensorbit-core-cuda
+        PRIVATE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
 
-target_link_libraries(tensorbit-core-cuda
-    PUBLIC
-        CUDA::cudart
-        CUDA::cublas
-        tensorbit-core
-)
+    target_link_libraries(tensorbit-core-cuda
+        PUBLIC
+            CUDA::cudart
+            CUDA::cublas
+            tensorbit-core
+    )
 
-set_target_properties(tensorbit-core-cuda PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-)
+    set_target_properties(tensorbit-core-cuda PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+endif()
 
 # -----------------------------------------------------------------------------
 # Executable Target: tb-prune (CLI tool)
@@ -126,11 +185,18 @@ target_include_directories(tb-prune
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-target_link_libraries(tb-prune
-    PRIVATE
-        tensorbit-core
-        tensorbit-core-cuda
-)
+if(TENSORBIT_ENABLE_CUDA)
+    target_link_libraries(tb-prune
+        PRIVATE
+            tensorbit-core
+            tensorbit-core-cuda
+    )
+else()
+    target_link_libraries(tb-prune
+        PRIVATE
+            tensorbit-core
+    )
+endif()
 
 set_target_properties(tb-prune PROPERTIES
     OUTPUT_NAME "tb-prune"
@@ -148,7 +214,6 @@ if(TENSORBIT_BUILD_TESTS)
     # test_ehap
     add_executable(test_ehap
         tests/test_ehap.cpp
-        src/ehap.cpp
     )
     target_include_directories(test_ehap
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -164,7 +229,6 @@ if(TENSORBIT_BUILD_TESTS)
     # test_coring
     add_executable(test_coring
         tests/test_coring.cpp
-        src/coring.cpp
     )
     target_include_directories(test_coring
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -183,7 +247,13 @@ endif()
 # -----------------------------------------------------------------------------
 include(GNUInstallDirs)
 
-install(TARGETS tensorbit-core tensorbit-core-cuda
+if(TENSORBIT_ENABLE_CUDA)
+    set(TB_INSTALL_TARGETS tensorbit-core tensorbit-core-cuda)
+else()
+    set(TB_INSTALL_TARGETS tensorbit-core)
+endif()
+
+install(TARGETS ${TB_INSTALL_TARGETS}
     EXPORT tensorbit-core-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

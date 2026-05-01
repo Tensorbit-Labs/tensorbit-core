@@ -21,10 +21,19 @@ set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 log() { echo -e "${GREEN}[setup]${NC} $*"; }
+warn() { echo -e "${YELLOW}[setup]${NC} $*"; }
 err() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+# --- Root Check ---
+if [[ "$EUID" -ne 0 ]]; then
+    err "This script must be run as root (use sudo)."
+    err "  Usage: sudo ./scripts/setup_cloud.sh"
+    exit 1
+fi
 
 # --- Platform Detection ---
 if [[ ! -f /etc/os-release ]]; then
@@ -32,6 +41,7 @@ if [[ ! -f /etc/os-release ]]; then
     exit 1
 fi
 
+# shellcheck disable=SC1091
 source /etc/os-release
 log "Detected: ${NAME} ${VERSION_ID}"
 
@@ -60,14 +70,17 @@ apt-get install -y -qq \
     libssl-dev
 
 # --- Install latest CMake if needed ---
-CMAKE_VERSION=$(cmake --version | head -1 | awk '{print $3}')
+CMAKE_VERSION=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || echo "0.0")
 CMAKE_MAJOR=$(echo "$CMAKE_VERSION" | cut -d. -f1)
 CMAKE_MINOR=$(echo "$CMAKE_VERSION" | cut -d. -f2)
 
 if [[ "$CMAKE_MAJOR" -lt 3 || ("$CMAKE_MAJOR" -eq 3 && "$CMAKE_MINOR" -lt 22) ]]; then
     log "CMake $CMAKE_VERSION is too old. Installing 3.28+ via Kitware repo..."
-    wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/kitware.list
+    wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
+        | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
+https://apt.kitware.com/ubuntu/ ${UBUNTU_CODENAME} main" \
+        > /etc/apt/sources.list.d/kitware.list
     apt-get update -qq
     apt-get install -y -qq cmake
 fi
@@ -75,18 +88,19 @@ fi
 # --- CUDA Toolkit 12 ---
 if ! command -v nvcc &>/dev/null; then
     log "Installing CUDA Toolkit 12.6..."
-    wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb
+    wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb" \
+        -O /tmp/cuda-keyring.deb
     dpkg -i /tmp/cuda-keyring.deb
     apt-get update -qq
     apt-get install -y -qq cuda-toolkit-12-6
     rm -f /tmp/cuda-keyring.deb
 
     # Add CUDA to PATH
-    cat >> /etc/profile.d/cuda.sh <<'EOF'
+    cat > /etc/profile.d/cuda.sh <<'EOF'
 export PATH=/usr/local/cuda-12/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:$LD_LIBRARY_PATH
 EOF
-    log "CUDA 12 installed. Reboot or source /etc/profile.d/cuda.sh to activate."
+    log "CUDA 12 installed. Reboot or run 'source /etc/profile.d/cuda.sh' to activate."
 else
     NVIDIA_SMI=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || echo "unknown")
     log "CUDA already installed (driver: ${NVIDIA_SMI})."
@@ -110,15 +124,19 @@ fi
 
 # --- Python for Model Utilities ---
 log "Setting up Python 3.11 environment..."
-apt-get install -y -qq python3.11 python3.11-venv python3.11-dev
+apt-get install -y -qq python3.11 python3.11-venv python3.11-dev 2>/dev/null || {
+    warn "Python 3.11 not found in apt. Trying python3 (system default)..."
+    apt-get install -y -qq python3 python3-venv python3-dev
+}
+
+PYTHON_BIN=$(command -v python3.11 2>/dev/null || command -v python3)
 
 if [[ ! -d /opt/tensorbit-venv ]]; then
-    python3.11 -m venv /opt/tensorbit-venv
+    "$PYTHON_BIN" -m venv /opt/tensorbit-venv
 fi
 
 # shellcheck disable=SC1091
 source /opt/tensorbit-venv/bin/activate
-
 pip install --quiet --upgrade pip setuptools wheel
 pip install --quiet \
     torch \
@@ -126,22 +144,26 @@ pip install --quiet \
     safetensors \
     numpy \
     huggingface_hub \
-    click
+    click 2>/dev/null || {
+    warn "Some pip packages may have failed. Check network connection and retry."
+}
 
 log "Python environment ready at /opt/tensorbit-venv"
 
 # --- ccache config ---
-ccache --max-size=20G || true
+ccache --max-size=20G 2>/dev/null || warn "ccache config skipped (ccache not found)"
 log "ccache configured (20 GB cache)."
 
 log ""
 log "=== Setup Complete ==="
 log "  CUDA:    /usr/local/cuda-12"
 log "  Eigen3:  $EIGEN_INSTALL_DIR"
-log "  Python:  /opt/tensorbit-venv (activate with: source /opt/tensorbit-venv/bin/activate)"
+log "  Python:  /opt/tensorbit-venv"
+log ""
+log "Activate Python env:  source /opt/tensorbit-venv/bin/activate"
 log ""
 log "Next steps:"
-log "  git clone https://github.com/your-org/tensorbit-core.git"
+log "  git clone <repo-url> tensorbit-core"
 log "  cd tensorbit-core"
 log "  mkdir build && cd build"
 log "  cmake .. -DEIGEN3_ROOT=${EIGEN_INSTALL_DIR} -GNinja"

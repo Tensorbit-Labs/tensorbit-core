@@ -67,16 +67,14 @@ enum class DeviceLocation : uint8_t {
 
 /// @brief A dense, row-major tensor owned on a single device (CPU or CUDA GPU).
 ///
-/// @tparam F A FloatingPoint type (float, double).
+/// @tparam T The scalar element type (float, double, uint8_t for masks, etc.).
 ///
 /// This class serves as the primary data container for all pruning operations.
 /// GPU-resident tensors manage their own CUDA allocation via a custom deleter.
-/// The class satisfies `TensorType<F>` and can be used directly with EHAPPruner
-/// and CORINGPruner templates.
-template<FloatingPoint F>
+template<typename T>
 class TensorDense {
 public:
-    using value_type = F;
+    using value_type = T;
 
     /// @name Construction and Destruction
     /// @{
@@ -89,7 +87,7 @@ public:
         : device_(dev) {
         rank_ = dims.size();
         TENSORBIT_CHECK(rank_ <= kMaxRank, "Tensor rank exceeds maximum supported dimensions");
-        size_ = 1;
+        size_ = (rank_ == 0) ? 0 : 1;
         for (std::size_t d = 0; d < rank_; ++d) {
             shape_[d] = dims[d];
             size_ *= dims[d];
@@ -98,32 +96,32 @@ public:
 
         if (dev == DeviceLocation::kDevice) {
 #ifdef __CUDACC__
-            F* raw_ptr = nullptr;
-            CUDA_CHECK(cudaMalloc(&raw_ptr, size_ * sizeof(F)));
-            data_ = std::unique_ptr<F[], Deleter>(raw_ptr, default_device_deleter);
+            T* raw_ptr = nullptr;
+            CUDA_CHECK(cudaMalloc(&raw_ptr, size_ * sizeof(T)));
+            data_ = std::unique_ptr<T[], Deleter>(raw_ptr, default_device_deleter);
 #else
             TENSORBIT_CHECK(false, "CUDA not available — cannot allocate device tensor");
 #endif
         } else {
-            F* raw_ptr = new F[size_]();
-            data_ = std::unique_ptr<F[], Deleter>(raw_ptr, default_host_deleter);
+            T* raw_ptr = new T[size_]();
+            data_ = std::unique_ptr<T[], Deleter>(raw_ptr, default_host_deleter);
         }
     }
 
     /// @brief Creates a tensor from an existing host buffer (takes ownership).
-    /// @param data Raw pointer to contiguous F data. Ownership is transferred; the
-    ///             pointer must have been allocated with `new F[]`.
+    /// @param data Raw pointer to contiguous data. Ownership is transferred; the
+    ///             pointer must have been allocated with `new T[]`.
     /// @param dims Dimension sizes.
-    TensorDense(F* data, std::span<const std::size_t> dims)
+    TensorDense(T* data, std::span<const std::size_t> dims)
         : device_(DeviceLocation::kHost) {
         rank_ = dims.size();
         TENSORBIT_CHECK(rank_ <= kMaxRank, "Tensor rank exceeds maximum supported dimensions");
-        size_ = 1;
+        size_ = (rank_ == 0) ? 0 : 1;
         for (std::size_t d = 0; d < rank_; ++d) {
             shape_[d] = dims[d];
             size_ *= dims[d];
         }
-        data_ = std::unique_ptr<F[], Deleter>(data, default_host_deleter);
+        data_ = std::unique_ptr<T[], Deleter>(data, default_host_deleter);
     }
 
     TensorDense()                                                 = default;
@@ -159,10 +157,10 @@ public:
     /// @{
 
     /// @brief Returns a pointer to the raw data buffer (host or device).
-    [[nodiscard]] F* data() noexcept { return data_.get(); }
+    [[nodiscard]] T* data() noexcept { return data_.get(); }
 
     /// @brief Returns a const pointer to the raw data buffer.
-    [[nodiscard]] const F* data() const noexcept { return data_.get(); }
+    [[nodiscard]] const T* data() const noexcept { return data_.get(); }
 
     /// @brief Returns the total number of elements in the tensor.
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
@@ -179,17 +177,17 @@ public:
     [[nodiscard]] DeviceLocation device() const noexcept { return device_; }
 
     /// @brief Returns the size in bytes of the raw buffer.
-    [[nodiscard]] std::size_t bytes() const noexcept { return size_ * sizeof(F); }
+    [[nodiscard]] std::size_t bytes() const noexcept { return size_ * sizeof(T); }
     /// @}
 
     /// @name Element Access (Host-Only)
     /// @{
 
     /// @brief Element access (no bounds check). Valid only on host-resident tensors.
-    [[nodiscard]] F& operator[](std::size_t idx) { return data_.get()[idx]; }
+    [[nodiscard]] T& operator[](std::size_t idx) { return data_.get()[idx]; }
 
     /// @brief Const element access.
-    [[nodiscard]] const F& operator[](std::size_t idx) const { return data_.get()[idx]; }
+    [[nodiscard]] const T& operator[](std::size_t idx) const { return data_.get()[idx]; }
 
     /// @brief Returns true if the tensor owns no data.
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
@@ -208,7 +206,7 @@ public:
         TensorDense result(shape(), DeviceLocation::kDevice);
         if (size_ > 0) {
             CUDA_CHECK(cudaMemcpy(result.data(), data_.get(),
-                                  size_ * sizeof(F), cudaMemcpyHostToDevice));
+                                   size_ * sizeof(T), cudaMemcpyHostToDevice));
         }
         return result;
 #else
@@ -227,7 +225,7 @@ public:
         TensorDense result(shape(), DeviceLocation::kHost);
         if (size_ > 0) {
             CUDA_CHECK(cudaMemcpy(result.data(), data_.get(),
-                                  size_ * sizeof(F), cudaMemcpyDeviceToHost));
+                                   size_ * sizeof(T), cudaMemcpyDeviceToHost));
         }
         return result;
 #else
@@ -239,15 +237,15 @@ public:
 
 private:
     static constexpr std::size_t kMaxRank = 8;
-    using Deleter = void (*)(F*);
+    using Deleter = void (*)(T*);
 
-    /// @brief Deallocates host memory allocated with `new F[]`.
-    static void default_host_deleter(F* ptr) {
+    /// @brief Deallocates host memory allocated with `new T[]`.
+    static void default_host_deleter(T* ptr) {
         delete[] ptr;
     }
 
     /// @brief Deallocates device memory allocated with `cudaMalloc`.
-    static void default_device_deleter(F* ptr) {
+    static void default_device_deleter(T* ptr) {
 #ifdef __CUDACC__
         cudaFree(ptr);
 #else
@@ -255,7 +253,7 @@ private:
 #endif
     }
 
-    std::unique_ptr<F[], Deleter> data_{nullptr, nullptr};
+    std::unique_ptr<T[], Deleter> data_{nullptr, nullptr};
     std::array<std::size_t, 8>    shape_{};
     std::size_t                    size_{0};
     std::size_t                    rank_{0};
@@ -266,7 +264,7 @@ private:
 // Deduction Guide
 // =========================================================================
 
-template<FloatingPoint F>
-TensorDense(F*, std::span<const std::size_t>) -> TensorDense<F>;
+template<typename T>
+TensorDense(T*, std::span<const std::size_t>) -> TensorDense<T>;
 
 }  // namespace tensorbit::core

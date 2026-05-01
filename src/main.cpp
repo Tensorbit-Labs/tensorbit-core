@@ -23,6 +23,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <span>
 #include <string_view>
@@ -209,9 +210,10 @@ int main(int argc, char* argv[]) {
         ehap_cfg.use_diagonal_fisher = true;
 
         EHAPPruner<float> pruner(ehap_cfg);
+        auto fisher_label = ehap_cfg.use_diagonal_fisher ? "on" : "off";
         TENSORBIT_LOG_INFO("  EHAPPruner initialized (damping={}, fisher={})",
                            ehap_cfg.damping,
-                           ehap_cfg.use_diagonal_fisher ? "on" : "off");
+                           fisher_label);
 
         // TODO(p2): accumulate_fisher() called per-batch during gradient descent.
         // TODO(p2): compute_importance() called after accumulation_steps.
@@ -235,9 +237,10 @@ int main(int argc, char* argv[]) {
     coring_cfg.use_cuda = true;
 
     CORINGPruner<float> coring_pruner(coring_cfg);
+    auto cuda_label = coring_cfg.use_cuda ? "on" : "off";
     TENSORBIT_LOG_INFO("  CORINGPruner initialized ({}:{}, CUDA={})",
                        coring_cfg.N, coring_cfg.M,
-                       coring_cfg.use_cuda ? "on" : "off");
+                       cuda_label);
 
     // TODO(p2): coring_pruner.prune(importance, weights) applies N:M sparsity.
     // TODO(p2): TBWriter.write(output_path, pruned_weights, nm_masks, N, M).
