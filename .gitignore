@@ -1,0 +1,41 @@
+# --- Build Artifacts ---
+build/
+bin/
+lib/
+out/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.a
+*.lib
+
+# --- IDE & System ---
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Python & Models ---
+__pycache__/
+*.py[cod]
+.env
+venv/
+env/
+*.safetensors
+*.bin
+*.pt
+*.onnx
+
+# --- Tensorbit Specific ---
+*.tb
+logs/
+temp/
+tests/data/
+
+/*.txt
+!/CMakeLists.txt
