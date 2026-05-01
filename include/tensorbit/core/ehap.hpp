@@ -13,8 +13,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <type_traits>
 #include <vector>
+
+#include <Eigen/Dense>
 
 #include "tensorbit/core/kernels.hpp"
 #include "tensorbit/core/tensor.hpp"
@@ -44,6 +47,10 @@ enum class ImportanceMode : uint8_t {
 enum class PruneStrategy : uint8_t {
     kOneShot   = 0,
     kIterative = 1,
+    /// Blockwise exact OBS pruning with inverse-Hessian compensation
+    /// (SparseGPT / WoodFisher style). Uses Cholesky decomposition on
+    /// blocks of obs_block_size weights. Requires Eigen3.
+    kBlockOBS  = 2,
 };
 
 /// @brief Post-pruning weight compensation.
@@ -92,6 +99,19 @@ struct EHAPConfig {
     /// If true, normalise Fisher diagonal per-layer by its L2 norm
     /// before computing importance (Theis et al. 2018, Sec. 3.2).
     bool normalize_fisher = false;
+
+    // -- Blockwise OBS (SparseGPT-style) settings --
+
+    /// Block size for blockwise OBS pruning. Weights are partitioned into
+    /// contiguous blocks of this size. Each block's Hessian is inverted
+    /// via Cholesky and exact OBS compensation is applied.
+    std::size_t obs_block_size = 128;
+
+    /// Weight α for the off-diagonal Hessian approximation:
+    /// H ≈ diag(F + λ) + α · W_block · W_block^T
+    /// α = 0 recovers purely diagonal (OBD) inverse.
+    /// α > 0 incorporates weight correlations for cross-weight compensation.
+    float obs_off_diag_alpha = 0.01f;
 };
 
 // ===========================================================================
@@ -455,6 +475,9 @@ public:
         if (config_.prune_strategy == PruneStrategy::kIterative) {
             return prune_iterative(weights);
         }
+        if (config_.prune_strategy == PruneStrategy::kBlockOBS) {
+            return prune_block_obs(weights);
+        }
 
         return prune_one_shot(weights);
     }
@@ -484,7 +507,153 @@ public:
     }
 
     // =======================================================================
-    // prune_iterative — multi-round pruning with compensation
+    // prune_block_obs — SparseGPT-style blockwise exact OBS pruning
+    // =======================================================================
+    /// @brief Blockwise exact OBS pruning with inverse-Hessian compensation.
+    ///
+    /// ## Algorithm (Frantar & Alistarh 2023; Hassibi & Stork 1993):
+    ///
+    /// The weight tensor is divided into contiguous blocks of size B
+    /// (obs_block_size). For each block:
+    ///
+    /// 1. **Hessian approximation**: Construct H ≈ diag(F + λ) + α·W·W^T
+    ///    using the accumulated Fisher diagonal plus a low-rank off-diagonal
+    ///    correction estimated from weight self-correlation.
+    ///
+    /// 2. **Cholesky inversion**: Compute H^{-1} via Eigen::LLT (H is SPD
+    ///    by construction — diagonal is strictly positive).
+    ///
+    /// 3. **Greedy OBS pruning**: For each weight to prune:
+    ///    a. Find i = argmin_j w_j^2 / [H^{-1}]_jj (minimum saliency).
+    ///    b. Apply exact OBS compensation to all block weights:
+    ///       δw_j = -w_i / [H^{-1}]_ii · [H^{-1}]_ji
+    ///    c. Set w_i = 0 (prune).
+    ///    d. Deflate H^{-1} via Sherman-Morrison rank-1 update:
+    ///       H^{-1} ← H^{-1} - (H^{-1}_{:,i}·H^{-1}_{i,:}) / H^{-1}_{ii}
+    ///
+    /// This is the **mathematically correct** OBS update: it minimizes the
+    /// quadratic loss increase ||w - w'||^2_H under the constraint that
+    /// weight i is pruned, solved exactly via the inverse Hessian.
+    ///
+    /// When α = 0 (diagonal only), steps (c)-(d) reduce to pure OBD:
+    /// no cross-weight compensation, H^{-1}_{ij} = 0 for i ≠ j.
+    ///
+    /// When α > 0, weight correlations introduce non-zero off-diagonal
+    /// entries in H, enabling true cross-weight compensation.
+    auto prune_block_obs(TensorDense<F>& weights) -> Result<std::size_t, EHAPError>
+    {
+        using Matrix = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
+        using Vector = Eigen::Matrix<F, Eigen::Dynamic, 1>;
+
+        std::size_t N    = weights.size();
+        std::size_t B    = config_.obs_block_size;
+        F alpha          = static_cast<F>(config_.obs_off_diag_alpha);
+        F damp           = static_cast<F>(config_.damping);
+        float sp         = config_.sparsity_ratio;
+        std::size_t keep = static_cast<std::size_t>(sp * static_cast<float>(N));
+        if (keep == 0) keep = 1;
+        if (keep >= N) return std::size_t{0};
+        std::size_t prune_total = N - keep;
+
+        std::size_t pruned = 0;
+        F* __restrict__ w = weights.data();
+        const F*  fdiag   = (!fisher_diag_.empty()) ? fisher_diag_.data() : nullptr;
+
+        std::size_t num_blocks = (N + B - 1) / B;
+
+        for (std::size_t b = 0; b < num_blocks; ++b) {
+            std::size_t block_start = b * B;
+            std::size_t block_end  = (block_start + B < N) ? block_start + B : N;
+            std::size_t block_size  = block_end - block_start;
+            std::size_t prune_block = (prune_total * block_size) / N;
+            if (b == num_blocks - 1)
+                prune_block = prune_total - pruned;
+            if (prune_block == 0) continue;
+
+            // 1. Build Hessian H = diag(F+λ) + α·W·W^T
+            Matrix H(static_cast<Eigen::Index>(block_size),
+                     static_cast<Eigen::Index>(block_size));
+            H.setZero();
+
+            // Diagonal from Fisher
+            for (std::size_t i = 0; i < block_size; ++i) {
+                F d = damp;
+                if (fdiag) d += fdiag[block_start + i];
+                H(static_cast<Eigen::Index>(i),
+                  static_cast<Eigen::Index>(i)) = d;
+            }
+
+            // Off-diagonal: α·W·W^T (low-rank correction)
+            if (alpha > static_cast<F>(0)) {
+                Vector wblock(static_cast<Eigen::Index>(block_size));
+                for (std::size_t i = 0; i < block_size; ++i)
+                    wblock(static_cast<Eigen::Index>(i)) = w[block_start + i];
+                H += alpha * wblock * wblock.transpose();
+            }
+
+            // 2. Cholesky decomposition → H^{-1}
+            Matrix Hinv;
+            {
+                auto llt = H.llt();
+                if (llt.info() != Eigen::Success) {
+                    // Regularise: add scaled identity if Cholesky fails
+                    F max_diag = static_cast<F>(0);
+                    for (Eigen::Index i = 0; i < H.rows(); ++i)
+                        if (H(i, i) > max_diag) max_diag = H(i, i);
+                    for (Eigen::Index i = 0; i < H.rows(); ++i)
+                        H(i, i) += max_diag * static_cast<F>(1e-6);
+                    llt = H.llt();
+                }
+                Hinv = llt.solve(
+                    Matrix::Identity(static_cast<Eigen::Index>(block_size),
+                                     static_cast<Eigen::Index>(block_size)));
+            }
+
+            // 3. Greedy OBS pruning loop
+            Vector w_vec(static_cast<Eigen::Index>(block_size));
+            for (std::size_t i = 0; i < block_size; ++i)
+                w_vec(static_cast<Eigen::Index>(i)) = w[block_start + i];
+
+            std::size_t pruned_in_block = 0;
+            while (pruned_in_block < prune_block) {
+                // a. Find weight with minimum saliency s_i = w_i^2 / Hinv_ii
+                F min_sal = std::numeric_limits<F>::max();
+                Eigen::Index best_idx = 0;
+                for (Eigen::Index i = 0; i < static_cast<Eigen::Index>(block_size); ++i) {
+                    F hii = Hinv(i, i);
+                    if (hii <= static_cast<F>(0)) continue;
+                    F sal = (w_vec(i) * w_vec(i)) / hii;
+                    if (sal < min_sal) { min_sal = sal; best_idx = i; }
+                }
+
+                if (min_sal >= std::numeric_limits<F>::max() / 2) break;
+
+                // b. OBS weight update: δw = -w_i / Hinv_ii * Hinv_{:,i}
+                F wi_old = w_vec(best_idx);
+                F inv_hii = static_cast<F>(1) / Hinv(best_idx, best_idx);
+                for (Eigen::Index j = 0; j < static_cast<Eigen::Index>(block_size); ++j) {
+                    if (j == best_idx) continue;
+                    w_vec(j) -= wi_old * inv_hii * Hinv(j, best_idx);
+                }
+                w_vec(best_idx) = static_cast<F>(0);
+
+                // c. Sherman-Morrison deflation:
+                // Hinv ← Hinv - Hinv_{:,i}·Hinv_{i,:} / Hinv_{ii}
+                Vector col = Hinv.col(best_idx);
+                Hinv -= (col * col.transpose()) / Hinv(best_idx, best_idx);
+
+                ++pruned_in_block;
+            }
+
+            // Write back updated weights
+            for (std::size_t i = 0; i < block_size; ++i)
+                w[block_start + i] = w_vec(static_cast<Eigen::Index>(i));
+
+            pruned += pruned_in_block;
+        }
+
+        return pruned;
+    }
     // =======================================================================
     /// @brief Iterative pruning: prune a fraction per round, compensate,
     /// recompute importance, repeat.

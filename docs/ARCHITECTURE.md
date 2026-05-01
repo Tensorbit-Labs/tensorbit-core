@@ -470,6 +470,7 @@ diagonal is kept until pruning completes, then freed via `reset()`.
 | P2    | EHAP importance + threshold | ✅ Done    | `ehap_importance_kernel`, `select_pruning_mask` (nth_element) |
 | P2    | EHAP importance modes (OBD/OBS/Normalized) | ✅ Done | Multiple score formulations per research literature |
 | P2    | EHAP iterative pruning + compensation | ✅ Done | Cubic schedule (Zhu & Gupta 2017), kBias/kRedist compensation |
+| P2    | EHAP blockwise exact OBS pruning | ✅ Done | Cholesky H^{-1}, Sherman-Morrison deflation, α·W·W^T off-diagonal (SparseGPT/WoodFisher) |
 | P2    | CORING optimal mask selection | ✅ Done | kTopN, kOptimal (Gosper's hack), kIterative (swap-refinement) |
 | P2    | CORING weight redistribution | ✅ Done | kProportional (Fisher-weighted), kUniform redistribution |
 | P2    | CORING permutation optimization | ✅ Done | Group-local magnitude sort for improved N:M quality |
