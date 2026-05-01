@@ -8,6 +8,8 @@ In the Tensorbit ecosystem-based workflow, the core acts as a surgical center. W
 
 ## The P-D-Q Pipeline
 
+## Tensorbit Model Zoo
+
 ## Tech Stack
 
 ## Usage: The `tb-prune` Utility
