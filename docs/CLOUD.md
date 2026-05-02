@@ -10,11 +10,11 @@ development — see `docs/DOCUMENTATION.md` for local laptop testing.
 
 | GPU | VRAM | Max model (FP32) | Hourly rate | Provider |
 |-----|------|------------------|-------------|----------|
-| A100-SXM4-80GB | 80 GB | 7B–8B | ~$1.10 | Lambda Labs, RunPod |
-| H100-SXM-80GB | 80 GB | 7B–13B | ~$2.50 | Lambda Labs |
+| A100-SXM4-80GB | 80 GB | 7B–8B | ~$1.10 | Lambda, RunPod |
+| H100-SXM-80GB | 80 GB | 7B–13B | ~$2.50 | Lambda |
 | A100-SXM4-40GB | 40 GB | Up to 3B | ~$0.75 | Vast.ai |
-| 2× A100-80GB | 160 GB | 13B–30B | ~$2.20 | Lambda Labs |
-| 4× A100-80GB | 320 GB | 30B–70B | ~$4.40 | Lambda Labs |
+| 2× A100-80GB | 160 GB | 13B–30B | ~$2.20 | Lambda |
+| 4× A100-80GB | 320 GB | 30B–70B | ~$4.40 | Lambda |
 
 For 7B-parameter models (Llama 2, Mistral), a single **A100-80GB** is sufficient.
 Peak memory during pruning: ~58 GB (28 GB weights + 28 GB Fisher + 2 GB masks).
@@ -23,17 +23,17 @@ Peak memory during pruning: ~58 GB (28 GB weights + 28 GB Fisher + 2 GB masks).
 
 ## Providers
 
-### Lambda Labs (Recommended)
+### Lambda (Recommended)
 
 Best balance of price, availability, and ease of use.
 
-1. Go to [lambdalabs.com/service/gpu-cloud](https://lambdalabs.com/service/gpu-cloud)
+1. Go to [lambda.ai](https://lambda.ai)
 2. Create an account, add SSH key
-3. Launch an instance:
-   - **Region:** us-west-1 or us-east-1 (lowest latency for US)
-   - **GPU:** 1× A100 (80 GB PCIe or SXM)
+3. Click **"Launch GPU instance"** from the dashboard
+4. Select:
+   - **GPU:** 1× NVIDIA H100 (80 GB SXM) or 1× A100 (80 GB SXM)
    - **Image:** Ubuntu 22.04
-4. SSH into the instance
+5. SSH into the instance
 
 ### RunPod
 
