@@ -69,6 +69,13 @@ apt-get install -y -qq \
     ca-certificates \
     libssl-dev
 
+# --- Install GCC 13 (required for std::vformat / std::make_format_args) ---
+log "Installing GCC 13..."
+apt-get install -y -qq gcc-13 g++-13
+update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+    --slave /usr/bin/g++ g++ /usr/bin/g++-13
+update-alternatives --set gcc /usr/bin/gcc-13
+
 # --- Install latest CMake if needed ---
 CMAKE_VERSION=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || echo "0.0")
 CMAKE_MAJOR=$(echo "$CMAKE_VERSION" | cut -d. -f1)

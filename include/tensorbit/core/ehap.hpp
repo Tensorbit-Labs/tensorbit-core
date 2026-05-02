@@ -166,12 +166,20 @@ public:
 
         if constexpr (std::is_same_v<F, float>) {
             if (gradients.device() == DeviceLocation::kDevice) {
-                F gpu_alpha = (step_count_ == 0) ? alpha : alpha * one_m_beta;
+                // First step: initialise Fisher from gradients.
+                // Subsequent steps: apply beta decay via host copy
+                // (FIXME: move beta decay into a dedicated GPU kernel).
                 if (step_count_ > 0) {
-                    F* fd = fisher_diag_.data();
-                    std::size_t N = fisher_diag_.size();
+                    auto h = fisher_diag_.to_host();
+                    F* fd = h.data();
+                    std::size_t N = h.size();
                     for (std::size_t i = 0; i < N; ++i) fd[i] *= beta;
+#ifdef TENSORBIT_ENABLE_CUDA
+                    CUDA_CHECK(cudaMemcpy(fisher_diag_.data(), h.data(),
+                                          N * sizeof(F), cudaMemcpyHostToDevice));
+#endif
                 }
+                F gpu_alpha = (step_count_ == 0) ? alpha : alpha * one_m_beta;
                 kernels::launch_fisher_accumulate(
                     fisher_diag_.data(), gradients.data(),
                     gradients.size(), gpu_alpha, nullptr);
@@ -219,16 +227,39 @@ public:
 
         if constexpr (std::is_same_v<F, float>) {
             if (weights.device() == DeviceLocation::kDevice) {
-                const float* fp = have_f ? fisher_diag_.data() : nullptr;
+                const float* fp = (have_f) ? fisher_diag_.data() : nullptr;
                 kernels::launch_ehap_importance(
                     weights.data(), fp, out_importance.data(),
                     N, config_.damping, nullptr);
                 CUDA_SYNC_CHECK();
-                if (config_.importance_mode == ImportanceMode::kOBD)
-                    return {};
+                // GPU kernel fixes OBD formula. For kOBS / kNormalized,
+                // copy importance to host for CPU transformation then push back.
+                if (config_.importance_mode != ImportanceMode::kOBD) {
+                    auto h = out_importance.to_host();
+                    // Transform OBD scores to target mode on host
+                    F* hi = h.data();
+                    const F* __restrict__ wi = weights.data();
+                    if (have_f) {
+                        const F* fi = fisher_diag_.data();
+                        for (std::size_t i = 0; i < N; ++i) {
+                            // GPU produced s_i = w_i^2 * (F_ii + damp)
+                            // Transform to target mode
+                            if (config_.importance_mode == ImportanceMode::kOBS)
+                                hi[i] = (wi[i] * wi[i]) / (fi[i] + damp);
+                            else  // kNormalized
+                                hi[i] = (wi[i] * wi[i] * (fi[i] + damp)) / (static_cast<F>(1) + wi[i] * wi[i]);
+                        }
+                    }
+#ifdef TENSORBIT_ENABLE_CUDA
+                    CUDA_CHECK(cudaMemcpy(out_importance.data(), h.data(),
+                                          N * sizeof(F), cudaMemcpyHostToDevice));
+#endif
+                }
+                return {};
             }
         }
 
+        // --- CPU path ---
         const F* __restrict__ wi = weights.data();
         F* __restrict__       so = out_importance.data();
 

@@ -211,31 +211,53 @@ int main(int argc, char* argv[]) {
             TENSORBIT_LOG_ERROR("Failed to open model: safetensors parse error");
             return 1;
         }
-        auto meta = sf.find("model.weight");
-        if (!meta) meta = &sf.tensors()[0];
-        if (!meta || meta->numel == 0) {
+
+        auto all_tensors = sf.tensors();
+        if (all_tensors.empty()) {
             TENSORBIT_LOG_ERROR("No tensors found in safetensors file");
             return 1;
         }
-        weights = TensorDense<float>(std::span(meta->shape.data(), meta->shape.size()),
+
+        // Use the first (or only) tensor
+        auto meta = all_tensors[0];
+        auto dtype_int = static_cast<int>(meta.dtype);
+        TENSORBIT_LOG_INFO("[Load] Found tensor: {} ({} elements, dtype={})",
+                           meta.name, meta.numel, dtype_int);
+
+        // Allocate host buffer
+        weights = TensorDense<float>(std::span(meta.shape.data(), meta.shape.size()),
                                      DeviceLocation::kHost);
-        std::vector<std::byte> buf(meta->length);
-        auto rd_r = sf.read_tensor_data(*meta, buf);
+        std::vector<std::byte> buf(meta.length);
+        auto rd_r = sf.read_tensor_data(meta, buf);
         if (!rd_r) {
             TENSORBIT_LOG_ERROR("Failed to read tensor data");
             return 1;
         }
-        std::memcpy(weights.data(), buf.data(), meta->length);
+
+        // Convert BF16/F16 to FP32 if needed
+        if (meta.dtype == loader::STDtype::kBF16 || meta.dtype == loader::STDtype::kF16) {
+            auto half_data = reinterpret_cast<const uint16_t*>(buf.data());
+            auto float_data = weights.data();
+            for (std::size_t i = 0; i < meta.numel; ++i) {
+                // BF16: the 16-bit value is the upper half of a float.
+                // Shift left by 16 to create an IEEE float with 16 zeroed mantissa bits.
+                uint32_t as_float = static_cast<uint32_t>(half_data[i]) << 16;
+                std::memcpy(&float_data[i], &as_float, sizeof(float));
+            }
+            TENSORBIT_LOG_INFO("[Load] Converted BF16/F16 to FP32 ({} elements)", meta.numel);
+        } else {
+            std::memcpy(weights.data(), buf.data(), meta.length);
+        }
+
         sf.close();
 
-        // Create dummy gradients for demo (real usage would accumulate from training)
-        grads = TensorDense<float>(std::span(meta->shape.data(), meta->shape.size()),
+        // Create mock gradients scaled to weight magnitudes
+        grads = TensorDense<float>(std::span(meta.shape.data(), meta.shape.size()),
                                    DeviceLocation::kHost);
         for (std::size_t i = 0; i < grads.size(); ++i)
-            grads[i] = 0.0f;
+            grads[i] = weights[i] * 0.01f;
 
-        TENSORBIT_LOG_INFO("[Load] Loaded tensor '{}' ({} elements, dtype F32)",
-                           meta->name, meta->numel);
+        TENSORBIT_LOG_INFO("[Load] Loaded tensor '{}' ({} elements)", meta.name, meta.numel);
     }
 
     std::size_t total_elements = weights.size();
@@ -306,7 +328,7 @@ int main(int argc, char* argv[]) {
     CORINGConfig coring_cfg;
     coring_cfg.N            = cfg.nm_n;
     coring_cfg.M            = cfg.nm_m;
-    coring_cfg.use_cuda      = false;
+    coring_cfg.use_cuda      = true;
     coring_cfg.mask_strategy = MaskStrategy::kTopN;
     coring_cfg.redist_mode   = RedistMode::kProportional;
     coring_cfg.hardware_aware_layout = true;
