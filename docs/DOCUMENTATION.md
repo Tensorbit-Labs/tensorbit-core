@@ -322,5 +322,3 @@ to 4096 total when `#pragma pack(1)` is used.
 - `docs/EHAP.md` — Complete EHAP mathematical exposition
 - `docs/CORING.md` — Complete CORING mathematical exposition
 - `docs/LOCAL_TEST.md` — Step-by-step local testing guide
-- `how_to_run.txt` — Build and run reference
-- `prompt3.txt` — Implementation summary and cloud deployment guide

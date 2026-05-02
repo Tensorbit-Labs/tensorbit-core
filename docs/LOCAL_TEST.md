@@ -33,7 +33,7 @@ bash tests/test_all.sh --skip-gpu --clean
 
 Expected: **14/14 tests passed** (7 EHAP + 7 CORING).
 
-If any fail, see `how_to_run.txt` for troubleshooting.
+If any fail, see `docs/DOCUMENTATION.md` for troubleshooting.
 
 ---
 
@@ -152,7 +152,7 @@ The mock tensor size is limited by your system RAM. On an 8 GB laptop:
 | 16,777,216 | 64 MB | ~500 MB | Yes |
 | 67,108,864 | 256 MB | ~2 GB | Maybe |
 
-For real LLM pruning (7B+ parameters), you need a cloud GPU — see `prompt3.txt`.
+For real LLM pruning (7B+ parameters), you need a cloud GPU — see `docs/DOCUMENTATION.md`.
 
 ---
 
