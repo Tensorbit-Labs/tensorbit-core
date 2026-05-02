@@ -235,16 +235,16 @@ When `F = float` and CUDA is enabled:
 - Adaptive per-block sparsity allocation based on data-dependent importance
 - EMA decay on both Fisher diagonal and gradient history
 
-### 8.2 What EHAP Does NOT Do (Phase 3+)
+### 8.2 What EHAP Does NOT Do (Future Work)
 
 - **Structured pruning** (channel/head/filter pruning): CORING handles N:M
-  fine-grained sparsity; coarse structural pruning is Phase 4.
+  fine-grained sparsity; coarse structural pruning is Future Work.
 - **Quantization coupling**: The pruning pipeline is precision-agnostic.
   INT4/INT8-aware pruning requires modifying the importance score to account
-  for quantisation error (Nagel et al. 2020) — Phase 4.
+  for quantisation error (Nagel et al. 2020) — Future Work.
 - **Layer sensitivity scaling**: Different transformer layers have different
   pruning tolerances (attention early layers vs MLP late layers). This would
-  require per-layer calibration passes — Phase 4.
+  require per-layer calibration passes — Future Work.
 - **Activation-aware Hessian**: SparseGPT computes H = X^T·X from input
   activations, which is not available in offline pruning. Our gradient-covariance
   approach is the best proxy without data.

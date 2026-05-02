@@ -33,12 +33,14 @@ tensorbit-core/
 │           ├── ehap.hpp              # EHAPPruner<F> — ALL implementations inline
 │           ├── coring.hpp            # CORINGPruner<F> — ALL implementations inline
 │           ├── kernels.hpp           # CUDA kernel launch declarations (6 functions)
-│           └── serialization.hpp     # TBWriter/TBReader — .tb binary format (stubs)
+│           ├── serialization.hpp     # TBWriter/TBReader — .tb binary format
+│           └── loader.hpp            # SafeTensorsFile — .safetensors metadata parser
 │
 ├── src/
-│   ├── main.cpp                      # CLI entry point (`tb-prune`) with std::span
+│   ├── main.cpp                      # CLI entry point — full load→prune→save pipeline
 │   ├── ehap.cpp                      # Explicit template instantiations only
 │   ├── coring.cpp                    # Explicit template instantiations only
+│   ├── serialization.cpp             # Explicit template instantiations (TBWriter/Reader)
 │   ├── kernels.cu                    # 6 CUDA kernels (compiled when CUDA enabled)
 │   └── kernels_stubs.cpp             # No-op stubs for CPU-only builds
 ├── tests/
@@ -77,7 +79,7 @@ tb-prune (executable)
         ├── include/tensorbit/core/ehap.hpp     // EHAPPruner interface
         ├── include/tensorbit/core/coring.hpp   // CORINGPruner interface
         ├── include/tensorbit/core/kernels.hpp  // CUDA kernel launch declarations
-        └── include/tensorbit/core/serialization.hpp  // .tb format stubs
+        └── include/tensorbit/core/serialization.hpp  // .tb binary I/O
 ```
 
 ### Header Dependency Order (acyclic)
@@ -401,13 +403,12 @@ Subsequent accumulation uses `fisher_accumulate_kernel` (element-wise +=).
   │        threshold = percentile(r)          │           │
   │        mask[i] = (imp[i] >= threshold)    │           │
   └──────────────┬───────────────────────────┘           │
-                 │ importance scores                    │ (Phase 3:
-                 ▼                                     │  Safetensors
-  ┌──────────────────────────────────────────┐          │  parser)
+                 │ importance scores                    │
+                 ▼                                     │
   │             CORINGPruner                 │          │
   │                                          │          │
   │  validate_config(importance.size())      │          │
-  │    ├─ N < M, M is power-of-2            │          │
+   │    ├─ N < M, shape divisible by M           │          │
   │    └─ Size divisible by M                │          │
   │                                          │          │
   │  generate_nm_mask(importance, mask_out)  │          │
@@ -459,29 +460,30 @@ diagonal is kept until pruning completes, then freed via `reset()`.
 
 ---
 
-## Roadmap: Implementation Phases
+## Capabilities
 
-| Phase | Component                   | Status     | Notes |
-|-------|-----------------------------|------------|-------|
-| P1    | Boilerplate + build system  | ✅ Done    | CMake, headers, CLI, Logger, tests |
-| P1    | C++20 compat audit          | ✅ Done    | std::expected→Result, format_string→vformat, lvalue constraint documented |
-| P1    | CPU-only build path         | ✅ Done    | TENSORBIT_ENABLE_CUDA=OFF, kernels_stubs.cpp, --skip-gpu flag |
-| P2    | EHAP fisher kernel          | ✅ Done    | `fisher_accumulate_kernel`, `fisher_diagonal_kernel` |
-| P2    | EHAP importance + threshold | ✅ Done    | `ehap_importance_kernel`, `select_pruning_mask` (nth_element) |
-| P2    | EHAP importance modes (OBD/OBS/Normalized) | ✅ Done | Multiple score formulations per research literature |
-| P2    | EHAP iterative pruning + compensation | ✅ Done | Cubic schedule (Zhu & Gupta 2017), kBias/kRedist compensation |
-| P2    | EHAP blockwise exact OBS pruning | ✅ Done | Cholesky H^{-1}, Sherman-Morrison deflation, α·W·W^T off-diagonal (SparseGPT/WoodFisher) |
-| P2    | CORING optimal mask selection | ✅ Done | kTopN, kOptimal (Gosper's hack), kIterative (swap-refinement) |
-| P2    | CORING weight redistribution | ✅ Done | kProportional (Fisher-weighted), kUniform redistribution |
-| P2    | CORING permutation optimization | ✅ Done | Group-local magnitude sort for improved N:M quality |
-| P3    | Safetensors parser          | 🔜 Planned | Read HuggingFace models for end-to-end CLI pruning |
-| P3    | .tb serialization layer     | 🔜 Planned | `TBWriter`/`TBReader` full implementation |
-| P3    | CLI driver completion       | 🔜 Planned | End-to-end orchestration in main.cpp |
-| P3    | std::filesystem integration | 🔜 Planned | D: drive space checks, model path management |
-| P4    | Multi-stream parallelism    | 🔜 Planned | CUDA stream pools for concurrent layer processing |
-| P4    | FP16/BF16 precision         | 🔜 Planned | `__half`/`__nv_bfloat16` kernels for reduced memory |
-| P4    | cuSPARSELt integration      | 🔜 Planned | Direct 2:4 matmul via `cusparseLtMatmul()` |
-| P4    | Inference runtime           | 🔜 Planned | Standalone .tb loader + sparse GEMM executor |
+| Area | Feature | Status |
+|------|---------|--------|
+| Core | C++20 build system with CMake + CUDA 12 + Eigen3 | ✅ |
+| Core | Custom `Result<T,E>` type, thread-safe Logger, CUDA_CHECK | ✅ |
+| Core | `TensorDense<T>` — host/device memory with `to_device()`/`to_host()` | ✅ |
+| Core | CPU-only build path (`TENSORBIT_ENABLE_CUDA=OFF`) | ✅ |
+| EHAP | Fisher EMA accumulation + Fisher diagonal + GPU kernels | ✅ |
+| EHAP | Importance scores: OBD, OBS-style, Normalized | ✅ |
+| EHAP | Iterative pruning with cubic schedule (Zhu & Gupta 2017) | ✅ |
+| EHAP | Blockwise exact OBS — Woodbury H⁻¹, gradient-covariance, adaptive sparsity | ✅ |
+| EHAP | Weight compensation: bias, proportional redistribution | ✅ |
+| CORING | N:M mask selection: top-N, optimal (C(M,N)), iterative swap-refine | ✅ |
+| CORING | GPU-accelerated 2:4 kernel (0 shared mem) + generic kernel (256 B shared) | ✅ |
+| CORING | Absolute-magnitude redistribution, hardware-aware Ampere 2:4 layout | ✅ |
+| IO | `.tb` binary format — TBWriter/TBReader with 4096-byte header, round-trip verify | ✅ |
+| IO | `.safetensors` parser — header-only SafeTensorsFile (F32/F16/BF16/I64) | ✅ |
+| CLI | `tb-prune` — full pipeline: load → EHAP → CORING → save .tb | ✅ |
+| CLI | Mock tensor mode for development on low-spec hardware | ✅ |
+| Future | Multi-stream CUDA parallelism | 🔜 |
+| Future | FP16/BF16 CUDA kernels | 🔜 |
+| Future | cuSPARSELt integration for direct sparse matmul | 🔜 |
+| Future | `tensorbit-run` standalone inference engine | 🔜 |
 
 ---
 

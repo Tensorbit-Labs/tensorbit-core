@@ -232,7 +232,7 @@ dispatches; other strategies fall back to CPU with automatic host/device transfe
 ## 12. Known Limitations
 
 - **GPU parity**: Only `kTopN` runs on GPU. `kOptimal` and `kIterative` are
-  CPU-only. A future phase could implement warp-level combinatorial enumeration
+  CPU-only. A future release could implement warp-level combinatorial enumeration
   in CUDA for kOptimal.
 - **Permutation reversal**: `permute_weights` reorders weights but does not
   track the index mapping for reversal. Caller must handle this.

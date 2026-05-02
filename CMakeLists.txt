@@ -113,6 +113,7 @@ set(CORE_HEADERS
 set(CORE_SOURCES
     src/ehap.cpp
     src/coring.cpp
+    src/serialization.cpp
 )
 
 set(CORE_CUDA_SOURCES

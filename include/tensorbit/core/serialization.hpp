@@ -1,15 +1,18 @@
 #pragma once
 
 /// @file serialization.hpp
-/// @brief Tensorbit Binary (.tb) serialization layer skeleton.
-///
-/// Provides hooks for reading and writing the proprietary `.tb` file format,
-/// which packages pruned weights and N:M masks for fast inference.
-///
+/// @brief Tensorbit Binary (.tb) serialization — full implementation.
 /// @ingroup tensorbit-core
+///
+/// The .tb format stores pruned weights and N:M masks for fast inference.
+/// Layout:
+///   [0..4095]     TBHeader (4096 bytes, packed)
+///   [4096..W+4095]  Weight data (FP32/FP16/BF16, little-endian)
+///   [W+4096..]      Mask data (1 byte per group, bits 0..M-1)
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <span>
 #include <string_view>
@@ -24,65 +27,57 @@ namespace tensorbit::core {
 // .tb Format Constants
 // ---------------------------------------------------------------------------
 
-/// Magic bytes at the start of every .tb file: "TB01" in ASCII.
-inline constexpr uint32_t kTBMagic = 0x31304254;  // "TB01" big-endian
-
-/// Current .tb format version.
-inline constexpr uint32_t kTBVersion = 1;
-
-/// Maximum header size (reserved for metadata).
-inline constexpr std::size_t kTBHeaderReserved = 4096;
+inline constexpr uint32_t   kTBMagic          = 0x31304254;
+inline constexpr uint32_t   kTBVersion        = 1;
+inline constexpr std::size_t kTBHeaderSize    = 4096;
 
 // ---------------------------------------------------------------------------
 // File Header (on-disk layout)
 // ---------------------------------------------------------------------------
 
 #pragma pack(push, 1)
-/// @brief On-disk header for the .tb binary format.
-///
-/// Immediately follows the magic bytes. All fields are little-endian.
 struct TBHeader {
-    uint32_t magic    = kTBMagic;   ///< Magic identifier.
-    uint32_t version  = kTBVersion; ///< Format version.
-    uint32_t nm_n     = 0;          ///< N in N:M sparsity pattern.
-    uint32_t nm_m     = 0;          ///< M in N:M sparsity pattern.
-    uint64_t num_weights = 0;       ///< Total number of weight elements.
-    uint64_t num_masks   = 0;       ///< Total number of mask bytes (packed bits).
-    uint64_t weights_offset = 0;    ///< Byte offset to the start of weight data.
-    uint64_t masks_offset   = 0;    ///< Byte offset to the start of mask data.
-    uint8_t  precision   = 0;       ///< 0=FP32, 1=FP16, 2=BF16.
-    uint8_t  reserved[2047];        ///< Padding for future extensions.
+    uint32_t magic            = kTBMagic;
+    uint32_t version          = kTBVersion;
+    uint32_t nm_n             = 0;
+    uint32_t nm_m             = 0;
+    uint64_t num_weights      = 0;
+    uint64_t num_mask_bytes   = 0;
+    uint64_t weights_offset   = kTBHeaderSize;
+    uint64_t masks_offset     = kTBHeaderSize;  // set at write-time
+    uint8_t  precision        = 0;  // 0=FP32, 1=FP16, 2=BF16
+    uint8_t  reserved[4047];        ///< Padding — total struct = 4096 bytes
 };
 #pragma pack(pop)
 
-static_assert(sizeof(TBHeader) == 4096, "TBHeader must be exactly 4096 bytes");
+static_assert(sizeof(TBHeader) == kTBHeaderSize,
+              "TBHeader must be exactly 4096 bytes");
 
 // ---------------------------------------------------------------------------
 // Serialization Error Codes
 // ---------------------------------------------------------------------------
 
-/// @brief Error codes for .tb serialization operations.
 enum class TBError : uint8_t {
-    kOk           = 0,
-    kFileOpen     = 1,
-    kFileWrite    = 2,
-    kFileRead     = 3,
-    kBadMagic     = 4,
+    kOk             = 0,
+    kFileOpen       = 1,
+    kFileWrite      = 2,
+    kFileRead       = 3,
+    kBadMagic       = 4,
     kVersionMismatch = 5,
-    kTruncated    = 6,
+    kTruncated       = 6,
+    kSeekFailed     = 7,
 };
 
-// ---------------------------------------------------------------------------
-// TBWriter — writes .tb files
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// TBWriter
+// ===========================================================================
 
-/// @class TBWriter
 /// @brief Serializes pruned weights and N:M masks into the `.tb` format.
 ///
 /// Usage:
 /// @code
 ///   TBWriter writer;
-///   auto result = writer.write("output.tb", pruned_weights, masks, 2, 4);
+///   auto r = writer.write("output.tb", weight_span, mask_span, 2, 4);
 /// @endcode
 class TBWriter {
 public:
@@ -96,37 +91,76 @@ public:
 
     /// @brief Writes a .tb file containing pruned weights and N:M masks.
     ///
-    /// @tparam F Floating-point type of the weights.
-    /// @param path        Output file path (e.g., "resnet50_pruned.tb").
-    /// @param weights     Pruned weight tensor (host-resident).
-    /// @param masks       Packed N:M bitmask (host-resident, uint8).
-    /// @param nm_n        N in the N:M pattern.
-    /// @param nm_m        M in the N:M pattern.
-    /// @return std::expected with success or TBError.
+    /// @tparam F Floating-point type of the weights (float/double).
+    /// @param path     Output file path.
+    /// @param weights  Pruned weight data (host-resident span).
+    /// @param masks    Packed N:M bitmask (1 byte per group, host-resident).
+    /// @param nm_n     N in the N:M pattern.
+    /// @param nm_m     M in the N:M pattern.
+    /// @return Success or TBError.
     template<FloatingPoint F>
-    auto write(std::string_view              path,
-               std::span<const F>            weights,
-               std::span<const uint8_t>      masks,
-               uint32_t                      nm_n,
-               uint32_t                      nm_m)
-        -> Result<void, TBError>;
+    auto write(std::string_view         path,
+               std::span<const F>       weights,
+               std::span<const uint8_t> masks,
+               uint32_t                 nm_n,
+               uint32_t                 nm_m) -> Result<void, TBError>
+    {
+        std::ofstream file(path.data(), std::ios::binary | std::ios::trunc);
+        if (!file.is_open())
+            return unexpected(TBError::kFileOpen);
 
-    /// @brief Returns the human-readable error message for the last operation.
-    [[nodiscard]] std::string_view last_error() const noexcept { return last_error_; }
+        std::size_t num_mask_bytes = masks.size();
+        std::size_t weights_byte_size = weights.size() * sizeof(F);
+
+        // Build header
+        TBHeader hdr{};
+        hdr.magic          = kTBMagic;
+        hdr.version        = kTBVersion;
+        hdr.nm_n           = nm_n;
+        hdr.nm_m           = nm_m;
+        hdr.num_weights    = weights.size();
+        hdr.num_mask_bytes  = num_mask_bytes;
+        hdr.weights_offset  = kTBHeaderSize;
+        hdr.masks_offset    = kTBHeaderSize + weights_byte_size;
+
+        // Precision byte
+        if constexpr (std::is_same_v<F, float>)
+            hdr.precision = 0;
+        else if constexpr (std::is_same_v<F, double>)
+            hdr.precision = 3;  // FP64 (custom encoding)
+        else
+            hdr.precision = 0;
+
+        std::memset(hdr.reserved, 0, sizeof(hdr.reserved));
+
+        // Write header (4096 bytes)
+        file.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        if (!file.good()) return unexpected(TBError::kFileWrite);
+
+        // Write weight blob
+        file.write(reinterpret_cast<const char*>(weights.data()),
+                   static_cast<std::streamsize>(weights_byte_size));
+        if (!file.good()) return unexpected(TBError::kFileWrite);
+
+        // Write mask blob
+        file.write(reinterpret_cast<const char*>(masks.data()),
+                   static_cast<std::streamsize>(num_mask_bytes));
+        if (!file.good()) return unexpected(TBError::kFileWrite);
+
+        return {};
+    }
 
 private:
     std::string last_error_;
 };
 
-// ---------------------------------------------------------------------------
-// TBReader — reads .tb files
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// TBReader
+// ===========================================================================
 
-/// @class TBReader
 /// @brief Deserializes a `.tb` file, extracting weights and masks.
 ///
-/// Intended for the Tensorbit inference runtime. Provides hooks for
-/// zero-copy memory mapping in future releases.
+/// Provides a `read_mmap()` stub for future zero-copy memory-mapped loading.
 class TBReader {
 public:
     TBReader()  = default;
@@ -137,32 +171,73 @@ public:
     TBReader(TBReader&&) noexcept        = default;
     TBReader& operator=(TBReader&&) noexcept = default;
 
-    /// @brief Opens and validates a .tb file, returning metadata.
+    /// @brief Opens and validates a .tb file, returning the parsed header.
     ///
-    /// This performs header validation (magic & version) and populates
-    /// internal metadata. Actual weight/mask data is not loaded until
-    /// `read_weights()` or `read_masks()` is called.
-    ///
-    /// @param path  Path to the .tb file.
-    /// @return std::expected with the parsed TBHeader on success, or TBError.
-    auto open(std::string_view path) -> Result<TBHeader, TBError>;
+    /// Performs magic-number and version checks.  Weight/mask data is not
+    /// loaded until `read_weights()` or `read_masks()` is called.
+    auto open(std::string_view path) -> Result<TBHeader, TBError>
+    {
+        file_.open(path.data(), std::ios::binary);
+        if (!file_.is_open())
+            return unexpected(TBError::kFileOpen);
+
+        TBHeader hdr{};
+        file_.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+        if (!file_.good() || file_.gcount() != static_cast<std::streamsize>(sizeof(hdr)))
+            return unexpected(TBError::kTruncated);
+
+        if (hdr.magic != kTBMagic)
+            return unexpected(TBError::kBadMagic);
+        if (hdr.version != kTBVersion)
+            return unexpected(TBError::kVersionMismatch);
+
+        header_ = hdr;
+        return hdr;
+    }
 
     /// @brief Reads weight data from the currently open .tb file.
     ///
     /// @tparam F Expected floating-point type.
-    /// @param out_weights Destination buffer (must be pre-sized).
-    /// @return std::expected with success or TBError.
+    /// @param out_weights Destination buffer (must be pre-sized to header_.num_weights).
     template<FloatingPoint F>
-    auto read_weights(std::span<F> out_weights) -> Result<void, TBError>;
+    auto read_weights(std::span<F> out_weights) -> Result<void, TBError>
+    {
+        if (!file_.is_open()) return unexpected(TBError::kFileOpen);
+        if (out_weights.size() < header_.num_weights)
+            return unexpected(TBError::kTruncated);
+
+        file_.seekg(static_cast<std::streamoff>(header_.weights_offset));
+        if (!file_.good()) return unexpected(TBError::kSeekFailed);
+
+        file_.read(reinterpret_cast<char*>(out_weights.data()),
+                   static_cast<std::streamsize>(header_.num_weights * sizeof(F)));
+        if (!file_.good()) return unexpected(TBError::kFileRead);
+
+        return {};
+    }
 
     /// @brief Reads mask data from the currently open .tb file.
-    ///
-    /// @param out_masks Destination buffer (must be pre-sized).
-    /// @return std::expected with success or TBError.
-    auto read_masks(std::span<uint8_t> out_masks) -> Result<void, TBError>;
+    auto read_masks(std::span<uint8_t> out_masks) -> Result<void, TBError>
+    {
+        if (!file_.is_open()) return unexpected(TBError::kFileOpen);
+        if (out_masks.size() < header_.num_mask_bytes)
+            return unexpected(TBError::kTruncated);
+
+        file_.seekg(static_cast<std::streamoff>(header_.masks_offset));
+        if (!file_.good()) return unexpected(TBError::kSeekFailed);
+
+        file_.read(reinterpret_cast<char*>(out_masks.data()),
+                   static_cast<std::streamsize>(header_.num_mask_bytes));
+        if (!file_.good()) return unexpected(TBError::kFileRead);
+
+        return {};
+    }
 
     /// @brief Closes the currently open file.
-    void close();
+    void close() { file_.close(); }
+
+    /// @brief Returns the parsed header (valid after successful open()).
+    [[nodiscard]] const TBHeader& header() const noexcept { return header_; }
 
 private:
     std::ifstream file_;
