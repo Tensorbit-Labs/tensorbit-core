@@ -3,8 +3,8 @@
 > **Note:** This file provides a high-level overview. For complete mathematical
 > exposition with derivations, implementation details, and references, see the
 > dedicated documents:
-> - **`docs/EHAP.md`** — Efficient Hessian-Aware Pruning (OBD/OBS framework, Fisher EMA, weight compensation, iterative pruning)
-> - **`docs/CORING.md`** — N:M Structured Sparsity (optimal mask selection, permutation optimization, weight redistribution, GPU kernel design)
+> - **`docs/EHAP.md`** — EHAP: Fisher EMA, OBD/OBS/Normalized scoring, blockwise exact OBS with Woodbury inverse, gradient-covariance Hessian, iterative pruning, weight compensation
+> - **`docs/CORING.md`** — CORING: N:M structured sparsity, optimal C(M,N) mask selection, iterative swap-refine, absolute-magnitude redistribution, Ampere 2:4 layout support
 
 ## 1. Problem Statement: Why Structured Pruning Matters for LLM Inference
 
