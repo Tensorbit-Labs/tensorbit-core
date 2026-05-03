@@ -13,7 +13,7 @@
 /// |-------------------|----------------------------------------|---------------|
 /// | `--model PATH`    | Path to .safetensors file              | *(mock)*      |
 /// | `--sparsity N:M`  | N:M sparsity pattern                   | `2:4`         |
-/// | `--output PATH`   | Output .tb file path                   | `output.tb`   |
+/// | `--output PATH`   | Output .tb path or directory            | `output.tb`   |
 /// | `--method NAME`   | EHAP | Magnitude                      | `EHAP`        |
 /// | `--strategy NAME` | OneShot | Iterative | BlockOBS       | `OneShot`     |
 /// | `--damping VAL`   | EHAP Fisher damping                    | `0.01`        |
@@ -23,7 +23,7 @@
 ///
 /// ## Usage Example
 /// @code
-///   tb-prune --model path/to/model.safetensors --sparsity 2:4 --output pruned.tb
+///   tb-prune --model path/to/model.safetensors --sparsity 2:4 --output pruned/
 ///   tb-prune --mock-size 16384 --sparsity 2:4 --strategy BlockOBS
 /// @endcode
 
@@ -33,8 +33,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -80,7 +82,7 @@ void print_usage(const char* prog_name) {
         "  --model PATH      Path to .safetensors file   [or omit for mock]\n\n"
         "Options:\n"
         "  --sparsity N:M    N:M sparsity pattern              [default: 2:4]\n"
-        "  --output PATH     Output .tb file path               [default: output.tb]\n"
+        "  --output PATH     Output .tb path (mock) or dir (real) [default: output.tb]\n"
         "  --method NAME     EHAP | Magnitude                   [default: EHAP]\n"
         "  --strategy NAME   OneShot | Iterative | BlockOBS     [default: OneShot]\n"
         "  --damping VAL     EHAP Fisher damping                [default: 0.01]\n"
@@ -89,8 +91,9 @@ void print_usage(const char* prog_name) {
         "  --version         Print version\n\n"
         "Examples:\n"
         "  %s --mock-size 16384 --sparsity 2:4 --output demo.tb\n"
-        "  %s --model model.safetensors --sparsity 2:4 --strategy BlockOBS\n",
-        prog_name, prog_name, prog_name);
+        "  %s --model model.safetensors --sparsity 2:4 --output ./pruned/\n"
+        "  %s --model model.safetensors --sparsity 2:4 --strategy BlockOBS --output ./out/\n",
+        prog_name, prog_name, prog_name, prog_name);
 }
 
 void print_version() {
@@ -98,10 +101,10 @@ void print_version() {
 }
 
 auto parse_sparsity(std::string_view spec, int& out_n, int& out_m) -> bool {
-    auto colon_pos = spec.find(':');
-    if (colon_pos == std::string_view::npos) return false;
-    auto n_str = spec.substr(0, colon_pos);
-    auto m_str = spec.substr(colon_pos + 1);
+    auto pos = spec.find(':');
+    if (pos == std::string_view::npos) return false;
+    auto n_str = spec.substr(0, pos);
+    auto m_str = spec.substr(pos + 1);
     auto parse_int = [](std::string_view sv, int& val) -> bool {
         auto r = std::from_chars(sv.data(), sv.data() + sv.size(), val);
         return r.ec == std::errc{} && val > 0;
@@ -109,28 +112,99 @@ auto parse_sparsity(std::string_view spec, int& out_n, int& out_m) -> bool {
     return parse_int(n_str, out_n) && parse_int(m_str, out_m) && out_n < out_m;
 }
 
-}  // namespace
+/// Sanitise a tensor name into a valid filename (replace '/' with '_').
+std::string sanitise_name(std::string_view name) {
+    std::string out(name);
+    for (auto& c : out)
+        if (c == '/' || c == '\\') c = '_';
+    return out;
+}
 
-// ===========================================================================
-// Mock model loader — generates a random weight tensor for demo purposes.
-// ===========================================================================
+/// Build EHAPConfig from CLI flags.
+EHAPConfig make_ehap_config(const CliConfig& cfg) {
+    EHAPConfig c;
+    c.damping              = cfg.damping;
+    c.sparsity_ratio       = cfg.sparsity_ratio;
+    c.use_diagonal_fisher  = true;
+    c.ema_decay            = 0.99f;
+    c.importance_mode      = ImportanceMode::kOBD;
+    if (cfg.strategy == "BlockOBS") {
+        c.prune_strategy      = PruneStrategy::kBlockOBS;
+        c.obs_block_size      = 128;
+        c.obs_off_diag_alpha  = 0.01f;
+    } else if (cfg.strategy == "Iterative") {
+        c.prune_strategy = PruneStrategy::kIterative;
+        c.prune_rounds   = 5;
+    } else {
+        c.prune_strategy = PruneStrategy::kOneShot;
+    }
+    if (cfg.method == "Magnitude")
+        c.use_diagonal_fisher = false;
+    return c;
+}
 
-auto load_mock_tensor(std::size_t num_elements)
-    -> std::pair<TensorDense<float>, TensorDense<float> /* grad */>
+/// Build CORINGConfig from CLI flags.
+CORINGConfig make_coring_config(const CliConfig& cfg) {
+    CORINGConfig c;
+    c.N                     = cfg.nm_n;
+    c.M                     = cfg.nm_m;
+    c.use_cuda              = true;
+    c.mask_strategy         = MaskStrategy::kTopN;
+    c.redist_mode           = RedistMode::kProportional;
+    c.hardware_aware_layout = true;
+    return c;
+}
+
+/// Load a single tensor from a safetensors file into FP32 host memory.
+auto load_safetensor(loader::SafeTensorsFile& sf, const loader::TensorMeta& meta)
+    -> Result<TensorDense<float>, loader::LoaderError>
 {
-    TensorDense<float> weights({&num_elements, 1}, DeviceLocation::kHost);
-    TensorDense<float> grads({&num_elements, 1}, DeviceLocation::kHost);
+    TensorDense<float> w(std::span(meta.shape.data(), meta.shape.size()),
+                         DeviceLocation::kHost);
+    std::vector<std::byte> buf(meta.length);
+    auto rd = sf.read_tensor_data(meta, buf);
+    if (!rd) return unexpected(rd.error());
+
+    if (meta.dtype == loader::STDtype::kBF16 || meta.dtype == loader::STDtype::kF16) {
+        auto half = reinterpret_cast<const uint16_t*>(buf.data());
+        auto fp32 = w.data();
+        for (std::size_t i = 0; i < meta.numel; ++i) {
+            uint32_t v = static_cast<uint32_t>(half[i]) << 16;
+            std::memcpy(&fp32[i], &v, sizeof(float));
+        }
+    } else {
+        std::memcpy(w.data(), buf.data(), meta.length);
+    }
+    return w;
+}
+
+/// Create mock gradients scaled to weight magnitudes.
+TensorDense<float> make_mock_gradients(const TensorDense<float>& weights) {
+    auto shp = std::span(weights.shape().data(), weights.rank());
+    TensorDense<float> g(shp, DeviceLocation::kHost);
+    for (std::size_t i = 0; i < g.size(); ++i)
+        g[i] = weights[i] * 0.01f;
+    return g;
+}
+
+/// Generate mock weights + gradients for demo mode.
+auto load_mock_tensor(std::size_t num_elements)
+    -> std::pair<TensorDense<float>, TensorDense<float>>
+{
+    TensorDense<float> wts({&num_elements, 1}, DeviceLocation::kHost);
+    TensorDense<float> grd({&num_elements, 1}, DeviceLocation::kHost);
 
     std::mt19937 rng(42);
     std::normal_distribution<float> dist(0.0f, 0.5f);
 
     for (std::size_t i = 0; i < num_elements; ++i) {
-        weights[i] = dist(rng);
-        grads[i]   = dist(rng) * 0.1f;
+        wts[i] = dist(rng);
+        grd[i] = dist(rng) * 0.1f;
     }
-
-    return {std::move(weights), std::move(grads)};
+    return {std::move(wts), std::move(grd)};
 }
+
+}  // namespace
 
 // ===========================================================================
 // Main
@@ -150,21 +224,21 @@ int main(int argc, char* argv[]) {
             return {};
         };
 
-        if (arg == "--model") {
+        if (arg == "--model")
             cfg.model_path = next_val();
-        } else if (arg == "--sparsity") {
+        else if (arg == "--sparsity") {
             auto spec = next_val();
             if (spec.empty() || !parse_sparsity(spec, cfg.nm_n, cfg.nm_m)) {
                 TENSORBIT_LOG_FATAL("--sparsity requires a valid N:M (e.g. 2:4)");
                 return 1;
             }
-        } else if (arg == "--output") {
+        } else if (arg == "--output")
             cfg.output_path = next_val();
-        } else if (arg == "--method") {
+        else if (arg == "--method")
             cfg.method = next_val();
-        } else if (arg == "--strategy") {
+        else if (arg == "--strategy")
             cfg.strategy = next_val();
-        } else if (arg == "--damping") {
+        else if (arg == "--damping") {
             auto val = next_val();
             if (!val.empty())
                 std::from_chars(val.data(), val.data() + val.size(), cfg.damping);
@@ -185,216 +259,188 @@ int main(int argc, char* argv[]) {
 
     if (cfg.show_help) { print_usage(args[0]); return 0; }
     if (cfg.show_version) { print_version(); return 0; }
-
-    // No model path → use mock
     if (cfg.model_path.empty()) cfg.use_mock = true;
 
     TENSORBIT_LOG_INFO("Tensorbit Core v0.2.0 — Pruning Pipeline");
-    auto sparsity_label = cfg.output_path;
-    TENSORBIT_LOG_INFO("  Output: {}", sparsity_label);
 
     // -------------------------------------------------------------------
-    // 2. Load weights (mock or real .safetensors)
+    // 2. Mock mode — single tensor demo
     // -------------------------------------------------------------------
-    TensorDense<float> weights;
-    TensorDense<float> grads;
-
     if (cfg.use_mock) {
         TENSORBIT_LOG_INFO("[Load] Generating mock weight tensor ({} elements)", cfg.mock_size);
-        auto m = load_mock_tensor(cfg.mock_size);
-        weights = std::move(m.first);
-        grads   = std::move(m.second);
-    } else {
-        loader::SafeTensorsFile sf;
-        auto open_r = sf.open(cfg.model_path);
-        if (!open_r) {
-            TENSORBIT_LOG_ERROR("Failed to open model: safetensors parse error");
-            return 1;
-        }
+        auto [weights, grads] = load_mock_tensor(cfg.mock_size);
 
-        auto all_tensors = sf.tensors();
-        if (all_tensors.empty()) {
-            TENSORBIT_LOG_ERROR("No tensors found in safetensors file");
-            return 1;
-        }
+        auto ehap_cfg   = make_ehap_config(cfg);
+        auto coring_cfg = make_coring_config(cfg);
 
-        // Use the first (or only) tensor
-        auto meta = all_tensors[0];
-        auto dtype_int = static_cast<int>(meta.dtype);
-        TENSORBIT_LOG_INFO("[Load] Found tensor: {} ({} elements, dtype={})",
-                           meta.name, meta.numel, dtype_int);
-
-        // Allocate host buffer
-        weights = TensorDense<float>(std::span(meta.shape.data(), meta.shape.size()),
-                                     DeviceLocation::kHost);
-        std::vector<std::byte> buf(meta.length);
-        auto rd_r = sf.read_tensor_data(meta, buf);
-        if (!rd_r) {
-            TENSORBIT_LOG_ERROR("Failed to read tensor data");
-            return 1;
-        }
-
-        // Convert BF16/F16 to FP32 if needed
-        if (meta.dtype == loader::STDtype::kBF16 || meta.dtype == loader::STDtype::kF16) {
-            auto half_data = reinterpret_cast<const uint16_t*>(buf.data());
-            auto float_data = weights.data();
-            for (std::size_t i = 0; i < meta.numel; ++i) {
-                // BF16: the 16-bit value is the upper half of a float.
-                // Shift left by 16 to create an IEEE float with 16 zeroed mantissa bits.
-                uint32_t as_float = static_cast<uint32_t>(half_data[i]) << 16;
-                std::memcpy(&float_data[i], &as_float, sizeof(float));
+        // EHAP — single pruner used for both prune + importance
+        EHAPPruner<float> ehap(ehap_cfg);
+        ehap.accumulate_fisher(grads, 0.01f);
+        if (cfg.strategy == "BlockOBS" && cfg.method != "Magnitude") {
+            for (int k = 0; k < 4; ++k) {
+                auto shp = std::span(grads.shape().data(), grads.rank());
+                TensorDense<float> snap(shp, DeviceLocation::kHost);
+                std::copy_n(grads.data(), grads.size(), snap.data());
+                for (std::size_t i = 0; i < snap.size(); ++i)
+                    snap[i] *= (0.9f + 0.02f * static_cast<float>(k));
+                ehap.store_gradient(snap);
             }
-            TENSORBIT_LOG_INFO("[Load] Converted BF16/F16 to FP32 ({} elements)", meta.numel);
-        } else {
-            std::memcpy(weights.data(), buf.data(), meta.length);
         }
+        auto ehap_r = ehap.prune(weights);
+        if (!ehap_r) { TENSORBIT_LOG_ERROR("EHAP pruning failed"); return 1; }
+        auto ehap_pct = 100.0 * static_cast<double>(ehap_r.value())
+                        / static_cast<double>(weights.size());
+        TENSORBIT_LOG_INFO("  EHAP pruned: {} weights ({:.1f}%)", ehap_r.value(), ehap_pct);
 
-        sf.close();
+        // CORING — reuse ehap for curvature-aware importance
+        CORINGPruner<float> coring(coring_cfg);
+        auto imp_shp = std::span(weights.shape().data(), weights.rank());
+        TensorDense<float>       imp(imp_shp, DeviceLocation::kHost);
+        TensorDense<uint8_t>    msk(imp_shp, DeviceLocation::kHost);
+        ehap.compute_importance(weights, imp);
+        auto coring_r = coring.prune(imp, weights);
+        if (!coring_r) { TENSORBIT_LOG_ERROR("CORING pruning failed"); return 1; }
+        auto coring_pct = 100.0 * static_cast<double>(coring_r.value())
+                          / static_cast<double>(weights.size());
+        TENSORBIT_LOG_INFO("  CORING ({}/{}): {} weights pruned ({:.1f}% sparsity)",
+                           coring_cfg.N, coring_cfg.M, coring_r.value(), coring_pct);
 
-        // Create mock gradients scaled to weight magnitudes
-        grads = TensorDense<float>(std::span(meta.shape.data(), meta.shape.size()),
-                                   DeviceLocation::kHost);
-        for (std::size_t i = 0; i < grads.size(); ++i)
-            grads[i] = weights[i] * 0.01f;
+        // Generate mask bytes for .tb
+        coring.generate_nm_mask(imp, msk);
+        std::size_t ng = weights.size() / static_cast<std::size_t>(coring_cfg.M);
+        std::vector<uint8_t> mask_bytes(ng);
+        std::copy_n(msk.data(), ng, mask_bytes.data());
 
-        TENSORBIT_LOG_INFO("[Load] Loaded tensor '{}' ({} elements)", meta.name, meta.numel);
-    }
+        TENSORBIT_LOG_INFO("[Save] Writing .tb file...");
+        TBWriter writer;
+        auto wr = writer.write(cfg.output_path,
+                               std::span<const float>(weights.data(), weights.size()),
+                               std::span<const uint8_t>(mask_bytes.data(), mask_bytes.size()),
+                               static_cast<uint32_t>(coring_cfg.N),
+                               static_cast<uint32_t>(coring_cfg.M));
+        if (!wr) { TENSORBIT_LOG_ERROR("Failed to write .tb file"); return 1; }
 
-    std::size_t total_elements = weights.size();
-    auto size_mb = static_cast<double>(total_elements * 4) / (1024.0 * 1024.0);
-    TENSORBIT_LOG_INFO("  Total weights: {} ({:.2f} MB FP32)",
-                       total_elements,
-                       size_mb);
+        auto size_kb = static_cast<double>(4096 + weights.size() * 4 + mask_bytes.size()) / 1024.0;
+        TENSORBIT_LOG_INFO("  Saved to '{}' ({:.2f} KB)", cfg.output_path, size_kb);
 
-    // -------------------------------------------------------------------
-    // 3. EHAP — Hessian-aware importance scoring
-    // -------------------------------------------------------------------
-    TENSORBIT_LOG_INFO("[EHAP] Computing importance scores...");
-
-    EHAPConfig ehap_cfg;
-    ehap_cfg.damping              = cfg.damping;
-    ehap_cfg.sparsity_ratio       = cfg.sparsity_ratio;
-    ehap_cfg.use_diagonal_fisher  = true;
-    ehap_cfg.ema_decay            = 0.99f;
-    ehap_cfg.importance_mode      = ImportanceMode::kOBD;
-
-    if (cfg.strategy == "BlockOBS") {
-        ehap_cfg.prune_strategy = PruneStrategy::kBlockOBS;
-        ehap_cfg.obs_block_size = 128;
-        ehap_cfg.obs_off_diag_alpha = 0.01f;
-    } else if (cfg.strategy == "Iterative") {
-        ehap_cfg.prune_strategy = PruneStrategy::kIterative;
-        ehap_cfg.prune_rounds   = 5;
-    } else {
-        ehap_cfg.prune_strategy = PruneStrategy::kOneShot;
-    }
-
-    if (cfg.method == "Magnitude") {
-        ehap_cfg.use_diagonal_fisher = false;
-    }
-
-    EHAPPruner<float> ehap(ehap_cfg);
-
-    // Accumulate Fisher from mock gradients
-    ehap.accumulate_fisher(grads, 0.01f);
-
-    // If gradient history desired for BlockOBS, store snapshots
-    if (cfg.strategy == "BlockOBS" && cfg.method != "Magnitude") {
-        for (int k = 0; k < 4; ++k) {
-            TensorDense<float> snap(std::span(grads.shape().data(), grads.rank()),
-                                    DeviceLocation::kHost);
-            std::copy_n(grads.data(), grads.size(), snap.data());
-            // Add small noise to create diverse snapshots
-            for (std::size_t i = 0; i < snap.size(); ++i) snap[i] *= (0.9f + 0.02f * static_cast<float>(k));
-            ehap.store_gradient(snap);
+        TBReader reader;
+        auto hdr = reader.open(cfg.output_path);
+        if (hdr) {
+            TENSORBIT_LOG_INFO("[Verify] .tb valid: magic=0x{:08X} v{} {}/{} sparsity {} wts",
+                               hdr->magic, hdr->version, hdr->nm_n, hdr->nm_m, hdr->num_weights);
+            reader.close();
         }
+        TENSORBIT_LOG_INFO("Done.");
+        return 0;
     }
 
-    auto prune_result = ehap.prune(weights);
-    if (!prune_result) {
-        TENSORBIT_LOG_ERROR("EHAP pruning failed");
-        return 1;
-    }
-    auto ehap_pruned = prune_result.value();
-    auto ehap_pct = 100.0 * static_cast<double>(ehap_pruned) / static_cast<double>(total_elements);
-    TENSORBIT_LOG_INFO("  EHAP pruned: {} weights ({:.1f}%)",
-                       ehap_pruned, ehap_pct);
-
     // -------------------------------------------------------------------
-    // 4. CORING — N:M structured sparsity
+    // 3. Real mode — iterate all tensors in safetensors file
     // -------------------------------------------------------------------
-    TENSORBIT_LOG_INFO("[CORING] Applying N:M structured sparsity...");
-
-    CORINGConfig coring_cfg;
-    coring_cfg.N            = cfg.nm_n;
-    coring_cfg.M            = cfg.nm_m;
-    coring_cfg.use_cuda      = true;
-    coring_cfg.mask_strategy = MaskStrategy::kTopN;
-    coring_cfg.redist_mode   = RedistMode::kProportional;
-    coring_cfg.hardware_aware_layout = true;
-
-    CORINGPruner<float> coring(coring_cfg);
-
-    // Recompute importance scores for CORING (curvature-aware from EHAP Fisher)
-    TensorDense<float> imp(std::span(weights.shape().data(), weights.rank()),
-                           DeviceLocation::kHost);
-    ehap.compute_importance(weights, imp);
-
-    auto coring_result = coring.prune(imp, weights);
-    if (!coring_result) {
-        TENSORBIT_LOG_ERROR("CORING pruning failed");
-        return 1;
-    }
-    auto coring_pruned = coring_result.value();
-    auto coring_pct = 100.0 * static_cast<double>(coring_pruned) / static_cast<double>(total_elements);
-    TENSORBIT_LOG_INFO("  CORING ({}/{}): {} weights pruned ({:.1f}% sparsity)",
-                       coring_cfg.N, coring_cfg.M, coring_pruned, coring_pct);
-
-    // -------------------------------------------------------------------
-    // 5. Serialize to .tb
-    // -------------------------------------------------------------------
-    TENSORBIT_LOG_INFO("[Save] Writing .tb file...");
-
-    // Build mask buffer for CORING (1 byte per group)
-    std::size_t num_groups = total_elements / static_cast<std::size_t>(coring_cfg.M);
-    std::vector<uint8_t> mask_bytes(num_groups, 0xFF);
-
-    // Re-generate the CORING mask for the current weight state
-    {
-        TensorDense<uint8_t> mask_tensor(std::span(weights.shape().data(), weights.rank()),
-                                         DeviceLocation::kHost);
-        coring.generate_nm_mask(imp, mask_tensor);
-        std::copy_n(mask_tensor.data(), num_groups, mask_bytes.data());
-    }
-
-    TBWriter writer;
-    auto write_result = writer.write(cfg.output_path,
-                                     std::span<const float>(weights.data(), weights.size()),
-                                     std::span<const uint8_t>(mask_bytes.data(), mask_bytes.size()),
-                                     static_cast<uint32_t>(coring_cfg.N),
-                                     static_cast<uint32_t>(coring_cfg.M));
-    if (!write_result) {
-        TENSORBIT_LOG_ERROR("Failed to write .tb file");
+    loader::SafeTensorsFile sf;
+    auto open_r = sf.open(cfg.model_path);
+    if (!open_r) {
+        auto err_code = static_cast<int>(open_r.error());
+        TENSORBIT_LOG_ERROR("Failed to open model: safetensors parse error (code={})",
+                            err_code);
         return 1;
     }
 
-    auto size_kb = static_cast<double>(4096 + weights.size() * 4 + mask_bytes.size()) / 1024.0;
-    TENSORBIT_LOG_INFO("  Saved to '{}' ({:.2f} KB)",
-                       cfg.output_path, size_kb);
-
-    // -------------------------------------------------------------------
-    // 6. Verify round-trip
-    // -------------------------------------------------------------------
-    TBReader reader;
-    auto read_hdr = reader.open(cfg.output_path);
-    if (read_hdr) {
-        auto hdr = read_hdr.value();
-        TENSORBIT_LOG_INFO("[Verify] .tb file valid: magic=0x{:08X}, v{}, {}/{} sparsity, {} weights",
-                           hdr.magic, hdr.version, hdr.nm_n, hdr.nm_m, hdr.num_weights);
-        reader.close();
+    auto all_tensors = sf.tensors();
+    if (all_tensors.empty()) {
+        TENSORBIT_LOG_ERROR("No tensors found in safetensors file");
+        return 1;
     }
 
-    TENSORBIT_LOG_INFO("Done.");
+    // Create output directory
+    std::filesystem::path out_dir(cfg.output_path.data());
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    if (ec) {
+        TENSORBIT_LOG_ERROR("Failed to create output directory: {}", cfg.output_path);
+        return 1;
+    }
+
+    auto ehap_cfg   = make_ehap_config(cfg);
+    auto coring_cfg = make_coring_config(cfg);
+    std::size_t tensor_count = 0;
+    std::size_t total_wts   = 0;
+    std::size_t total_pruned = 0;
+
+    auto num_tensors = all_tensors.size();
+    TENSORBIT_LOG_INFO("[Load] Processing {} tensor(s) from '{}'",
+                       num_tensors, cfg.model_path);
+
+    for (auto& meta : all_tensors) {
+        // Skip non-weight tensors (e.g. int64 tokenizer arrays)
+        if (meta.dtype != loader::STDtype::kF32 &&
+            meta.dtype != loader::STDtype::kBF16 &&
+            meta.dtype != loader::STDtype::kF16)
+            continue;
+
+        auto w_res = load_safetensor(sf, meta);
+        if (!w_res) { TENSORBIT_LOG_WARN("  SKIP {}: read error", meta.name); continue; }
+        auto weights = std::move(w_res.value());
+        auto grads   = make_mock_gradients(weights);
+
+        TENSORBIT_LOG_INFO("  [{}] {} — {} elements", tensor_count, meta.name, meta.numel);
+
+        // --- EHAP (one pruner for both prune + importance) ---
+        EHAPPruner<float> ehap(ehap_cfg);
+        ehap.accumulate_fisher(grads, 0.01f);
+        if (cfg.strategy == "BlockOBS" && cfg.method != "Magnitude") {
+            for (int k = 0; k < 4; ++k) {
+                auto shp = std::span(grads.shape().data(), grads.rank());
+                TensorDense<float> snap(shp, DeviceLocation::kHost);
+                std::copy_n(grads.data(), grads.size(), snap.data());
+                for (std::size_t i = 0; i < snap.size(); ++i)
+                    snap[i] *= (0.9f + 0.02f * static_cast<float>(k));
+                ehap.store_gradient(snap);
+            }
+        }
+        auto ehap_r = ehap.prune(weights);
+        if (!ehap_r) { TENSORBIT_LOG_WARN("    SKIP (EHAP failed)"); continue; }
+
+        // --- CORING (reuse ehap for curvature-aware importance) ---
+        CORINGPruner<float> coring(coring_cfg);
+        auto imp_shp = std::span(weights.shape().data(), weights.rank());
+        TensorDense<float>       imp(imp_shp, DeviceLocation::kHost);
+        TensorDense<uint8_t>    msk(imp_shp, DeviceLocation::kHost);
+        ehap.compute_importance(weights, imp);
+        auto coring_r = coring.prune(imp, weights);
+        if (!coring_r) { TENSORBIT_LOG_WARN("    SKIP (CORING failed)"); continue; }
+        coring.generate_nm_mask(imp, msk);
+        std::size_t ng = weights.size() / static_cast<std::size_t>(coring_cfg.M);
+        std::vector<uint8_t> mask_bytes(ng);
+        std::copy_n(msk.data(), ng, mask_bytes.data());
+
+        // --- Save .tb ---
+        auto fname = sanitise_name(meta.name) + ".tb";
+        auto path  = out_dir / fname;
+
+        TBWriter writer;
+        auto wr = writer.write(path.string(),
+                               std::span<const float>(weights.data(), weights.size()),
+                               std::span<const uint8_t>(mask_bytes.data(), mask_bytes.size()),
+                               static_cast<uint32_t>(coring_cfg.N),
+                               static_cast<uint32_t>(coring_cfg.M));
+        if (!wr) { TENSORBIT_LOG_WARN("    SKIP (write error)"); continue; }
+
+        auto tb_kb = static_cast<double>(4096 + weights.size() * 4 + mask_bytes.size()) / 1024.0;
+        TENSORBIT_LOG_INFO("    -> '{}' ({:.1f} KB — {} wts, {} pruned by CORING)",
+                           fname, tb_kb, meta.numel, coring_r.value());
+
+        ++tensor_count;
+        total_wts    += meta.numel;
+        total_pruned += coring_r.value();
+    }
+
+    sf.close();
+
+    auto denom = std::max(total_wts, std::size_t{1});
+    auto pct = 100.0 * static_cast<double>(total_pruned) / static_cast<double>(denom);
+    TENSORBIT_LOG_INFO("Done. {} tensors, {} total weights, {} pruned ({:.1f}%). Output: {}",
+                       tensor_count, total_wts, total_pruned, pct, cfg.output_path);
 
     return 0;
 }

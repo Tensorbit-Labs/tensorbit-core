@@ -92,7 +92,7 @@ tb-prune --model <PATH> [OPTIONS]
 | `--model PATH` | string | *(none)* | Path to a `.safetensors` model file |
 | `--mock-size N` | integer | — | Random mock tensor of N elements |
 | `--sparsity N:M` | pattern | `2:4` | N:M structured sparsity (N < M) |
-| `--output PATH` | string | `output.tb` | Output `.tb` file path |
+| `--output PATH` | string | `output.tb` | Output path — a single `.tb` file for mock mode, or an output directory for real mode |
 | `--method NAME` | string | `EHAP` | `EHAP` or `Magnitude` |
 | `--strategy NAME` | string | `OneShot` | `OneShot`, `Iterative`, or `BlockOBS` |
 | `--damping VAL` | float | `0.01` | Fisher damping λ |
@@ -119,6 +119,14 @@ tb-prune --model <PATH> [OPTIONS]
 
 # Magnitude only (no Hessian)
 ./bin/tb-prune --mock-size 16384 --method Magnitude --output demo_mag.tb
+```
+
+### Multi-Tensor Testing
+
+```bash
+pip install torch safetensors
+bash tests/multi_tensor/test_multi.sh
+# Expected: 5 .tb files produced, all with valid TB01 magic bytes
 ```
 
 ---
