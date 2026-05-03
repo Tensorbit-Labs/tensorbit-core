@@ -33,9 +33,13 @@ env/
 
 # --- Tensorbit Specific ---
 *.tb
+*.tbm
+*.safetensors
 logs/
 temp/
 tests/data/
+tests/multi_tensor/output/
+tests/multi_tensor/multi_model.safetensors
 
 /*.txt
 !/CMakeLists.txt

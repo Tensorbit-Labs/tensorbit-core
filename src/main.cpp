@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <span>
 #include <string>
@@ -367,6 +368,19 @@ int main(int argc, char* argv[]) {
     std::size_t total_wts   = 0;
     std::size_t total_pruned = 0;
 
+    // Track tensor metadata for .tbm output
+    struct TbmEntry {
+        std::string name;
+        std::string path;       // .tb file path
+        std::size_t num_weights;
+        std::size_t num_mask_bytes;
+        std::size_t shape_0;    // first dim (out_features for linear layers)
+        std::size_t shape_1;    // second dim (in_features)
+        int nm_n;
+        int nm_m;
+    };
+    std::vector<TbmEntry> tbm_entries = {};
+
     auto num_tensors = all_tensors.size();
     TENSORBIT_LOG_INFO("[Load] Processing {} tensor(s) from '{}'",
                        num_tensors, cfg.model_path);
@@ -430,12 +444,97 @@ int main(int argc, char* argv[]) {
         TENSORBIT_LOG_INFO("    -> '{}' ({:.1f} KB — {} wts, {} pruned by CORING)",
                            fname, tb_kb, meta.numel, coring_r.value());
 
+        // Track for .tbm container
+        tbm_entries.push_back(TbmEntry{
+            std::string(meta.name),
+            path.string(),
+            meta.numel,
+            mask_bytes.size(),
+            meta.shape.empty() ? 0 : meta.shape[0],
+            meta.shape.size() > 1 ? meta.shape[1] : 1,
+            coring_cfg.N,
+            coring_cfg.M});
+
         ++tensor_count;
         total_wts    += meta.numel;
         total_pruned += coring_r.value();
     }
 
     sf.close();
+
+    // --- Build .tbm container ---
+    if (!tbm_entries.empty()) {
+        auto tbm_path = out_dir / "model.tbm";
+        auto tbm_path_str = tbm_path.string();
+        TENSORBIT_LOG_INFO("[TBM] Building container: {}", tbm_path_str);
+
+        std::ofstream tbm(tbm_path, std::ios::binary | std::ios::trunc);
+        if (!tbm.is_open()) {
+            TENSORBIT_LOG_ERROR("Failed to create .tbm file");
+        } else {
+            // 1. Concatenate .tb file contents + build JSON index
+            std::string json = "{";
+            json += "\"architecture\":\"llama\",";
+            json += "\"config\":{";
+            json += "\"num_layers\":" + std::to_string(tensor_count);
+            json += ",\"hidden_size\":512";
+            json += ",\"num_heads\":8";
+            json += ",\"num_kv_heads\":4";
+            json += ",\"head_dim\":64";
+            json += ",\"intermediate_size\":2048";
+            json += ",\"vocab_size\":256";
+            json += ",\"max_seq_len\":128";
+            json += ",\"norm_eps\":1e-5";
+            json += ",\"rope_theta\":10000";
+            json += "},\"tensors\":[";
+            std::string_view sep;
+
+            for (auto& entry : tbm_entries) {
+                size_t offset = static_cast<size_t>(tbm.tellp());
+
+                // Read and append the .tb file contents
+                std::ifstream tb_file(entry.path, std::ios::binary);
+                tb_file.seekg(0, std::ios::end);
+                auto file_size = static_cast<size_t>(tb_file.tellg());
+                tb_file.seekg(0, std::ios::beg);
+
+                std::vector<char> buf(file_size);
+                tb_file.read(buf.data(), static_cast<std::streamsize>(file_size));
+                tbm.write(buf.data(), static_cast<std::streamsize>(file_size));
+                tb_file.close();
+
+                // JSON entry with full metadata
+                json += sep;
+                auto nw = std::to_string(entry.num_weights);
+                auto nmb = std::to_string(entry.num_mask_bytes);
+                auto off = std::to_string(offset);
+                auto s0 = std::to_string(entry.shape_0);
+                auto s1 = std::to_string(entry.shape_1);
+                json += "{\"name\":\"" + entry.name + "\",";
+                json += "\"offset\":" + off + ",";
+                json += "\"shape\":[" + s0 + "," + s1 + "],";
+                json += "\"nm_n\":" + std::to_string(entry.nm_n) + ",";
+                json += "\"nm_m\":" + std::to_string(entry.nm_m) + ",";
+                json += "\"dtype\":\"fp32\",";
+                json += "\"num_weights\":" + nw + ",";
+                json += "\"num_mask_bytes\":" + nmb + "}";
+                sep = ",";
+            }
+
+            json += "]}";
+
+            // 2. Write JSON index
+            tbm.write(json.data(), static_cast<std::streamsize>(json.size()));
+
+            // 3. Write 4-byte index length (LE)
+            uint32_t idx_len = static_cast<uint32_t>(json.size());
+            tbm.write(reinterpret_cast<const char*>(&idx_len), sizeof(idx_len));
+
+            tbm.close();
+            auto entry_count = tbm_entries.size();
+            TENSORBIT_LOG_INFO("[TBM] Container written: model.tbm ({} tensors)", entry_count);
+        }
+    }
 
     auto denom = std::max(total_wts, std::size_t{1});
     auto pct = 100.0 * static_cast<double>(total_pruned) / static_cast<double>(denom);
