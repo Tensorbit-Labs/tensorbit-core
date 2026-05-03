@@ -39,3 +39,4 @@ tests/data/
 
 /*.txt
 !/CMakeLists.txt
+AGENTS.md
