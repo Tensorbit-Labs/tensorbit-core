@@ -1,19 +1,22 @@
-# Tensorbit Core Pruning Demo - Mistral 7B
+# Tensorbit Core Pruning Demo — Mistral 7B
 
 This demo prunes [Mistral 7B v0.1](https://huggingface.co/mistralai/Mistral-7B-v0.1) 
-with 2:4 structured sparsity using the BlockOBS strategy on a single NVIDIA A100 80GB GPU.
+with 2:4 structured sparsity using the BlockOBS strategy on a single NVIDIA A100 GPU.
 
 ## Hardware
 
-| Component | Spec |
-|-----------|------|
-| GPU | 1× NVIDIA A100 80GB SXM |
-| CPU | 16+ vCPU |
-| RAM | 64+ GB |
-| Storage | 100 GB SSD |
-| Cost | ~$1.10/hr (Lambda) |
-| Time | ~40 minutes |
-| Total | ~$0.73 |
+| Component | Spec (Lambda) |
+|-----------|---------------|
+| GPU | 1× NVIDIA A100 PCIe 40GB |
+| CPU | 30 vCPU |
+| RAM | 225 GiB |
+| Storage | 512 GiB SSD |
+| Cost | $1.99/hr (Lambda) |
+| Time (est.) | ~20–40 minutes |
+| Total (est.) | ~$0.66–$1.33 |
+
+The A100 PCIe 40GB is the recommended GPU. VRAM per-tensor needed is ~3 GB,
+far below the 40 GB limit — all tensor sizes fit, processed one at a time.
 
 ## Setup
 
@@ -28,7 +31,10 @@ cd tensorbit-core
 # Install dependencies
 sudo ./scripts/setup_cloud.sh
 
-# Exit and re-ssh to activate CUDA PATH, then:
+# Reboot to activate CUDA PATH, then:
+sudo reboot
+# Wait 60s, SSH again:
+ssh ubuntu@<instance-ip>
 cd tensorbit-core
 
 # Download model
@@ -51,7 +57,21 @@ cd build
     --model ../models/mistral-7b/consolidated.safetensors \
     --sparsity 2:4 \
     --strategy BlockOBS \
-    --output mistral-7b-2of4.tb
+    --output ./pruned/
+# Output: ./pruned/ directory with hundreds of .tb files
+# (one per tensor in the model, named by tensor name)
+```
+
+## Expected Output
+
+```
+[INFO] [Load] Processing ~300 tensor(s) from 'consolidated.safetensors'
+[INFO]   [0] model.embed_tokens.weight — 256M elements
+[INFO]   [1] model.layers.0.self_attn.q_proj.weight — 4.7M elements
+[INFO]     -> 'model.layers.0.self_attn.q_proj.weight.tb' (18 MB)
+[INFO]   [2] model.layers.0.self_attn.k_proj.weight — 4.7M elements
+...
+[INFO] Done. ~300 tensors, ~7.2B total weights, ~3.6B pruned (50.0%)
 ```
 
 ## Results
@@ -59,29 +79,33 @@ cd build
 | Metric | Before | After |
 |--------|--------|-------|
 | Model | Mistral 7B v0.1 | Mistral 7B v0.1 (2:4 sparse) |
-| Parameters | 7,241,728,000 | 7,241,728,000 |
-| Non-zero weights | 7,241,728,000 | 3,620,864,000 |
-| Pruned | — | 3,620,864,000 (50.0%) |
-| FP32 size | 27.6 GB | 27.6 GB |
-| N:M masks | — | 1.7 GB (in .tb) |
-| .tb file size | — | ~29.3 GB |
+| Total parameters | 7,241,728,000 | 7,241,728,000 |
+| Pruned (EHAP) | — | ~50% of weights |
+| Pruned (CORING 2:4) | — | 3,620,864,000 (50.0%) |
 | Strategy | — | BlockOBS |
 | Method | — | EHAP (Fisher EMA + gradient covariance) |
+| Output | — | `./pruned/` (~300 .tb files, ~29 GB total) |
 
 ## Verify
 
 ```bash
-# Check .tb header
-xxd mistral-7b-2of4.tb | head -4
+# List all pruned layers
+ls -la pruned/ | head -5
+# Expected: hundreds of .tb files
+
+# Check a single .tb header
+xxd pruned/model.layers.0.self_attn.q_proj.weight.tb | head -4
 # Expected: 5442 3031 ("TB01"), v1, 2/4 sparsity
 
-# Round-trip verification logged in prune output:
-# [Verify] .tb file valid: magic=0x31304254, v1, 2/4 sparsity, 7241728000 weights
+# Count total files and total size
+echo "$(ls pruned/*.tb | wc -l) .tb files"
+du -sh pruned/
 ```
 
 ## Next Steps
 
-The `.tb` file is ready for:
-- **tensorbit-distill** — teacher-student distillation
-- **tensorbit-quant** — INT4/INT8 quantization
+The `.tb` files in `./pruned/` are ready for:
+
 - **tensorbit-run** — native GPU inference with Sparse Tensor Cores
+- **tensorbit-distill** — teacher-student distillation  
+- **tensorbit-quant** — INT4/INT8 quantization

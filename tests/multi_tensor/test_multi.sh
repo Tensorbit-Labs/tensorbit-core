@@ -26,12 +26,26 @@ echo ""
 
 # --- Check prerequisites ---
 PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
-        PYTHON="$cmd"
+
+# Prefer D: drive venv (where user has torch installed)
+for candidate in \
+    "/mnt/d/venv/tensorbit/bin/python3" \
+    "/mnt/d/venv/tensorbit/bin/python"; do
+    if [[ -x "$candidate" ]]; then
+        PYTHON="$candidate"
         break
     fi
 done
+
+# Fallback to system python3
+if [[ -z "$PYTHON" ]]; then
+    for cmd in python3 python; do
+        if command -v "$cmd" &>/dev/null; then
+            PYTHON="$cmd"
+            break
+        fi
+    done
+fi
 
 if [[ -z "$PYTHON" ]]; then
     echo "[ERROR] No Python found. Install: sudo apt install python3"
@@ -41,20 +55,17 @@ fi
 echo "[INFO] Using Python: $($PYTHON --version 2>&1)"
 
 # Try importing required packages (auto-install if missing)
-if ! $PYTHON -c "import torch, safetensors" 2>/dev/null; then
-    echo "[INFO] torch/safetensors not found. Installing via pip..."
-    echo "  Tip: use a D: drive venv to save C: space:"
-    echo "    python3 -m venv /mnt/d/venv/tensorbit"
-    echo "    source /mnt/d/venv/tensorbit/bin/activate"
-    echo "    pip install torch safetensors"
-    echo ""
+# Check torch and safetensors (not safetensors.torch — that needs 'packaging')
+if ! $PYTHON -c "import torch; import safetensors" 2>/dev/null; then
+    echo "[INFO] torch or safetensors not found. Installing..."
+    $PYTHON -m pip install numpy packaging --quiet 2>/dev/null || true
     $PYTHON -m pip install torch safetensors --quiet 2>/dev/null || {
         $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet 2>/dev/null
-        $PYTHON -m pip install safetensors --quiet 2>/dev/null || true
+        $PYTHON -m pip install safetensors numpy packaging --quiet 2>/dev/null || true
     }
-    if ! $PYTHON -c "import torch, safetensors" 2>/dev/null; then
+    if ! $PYTHON -c "import torch; import safetensors" 2>/dev/null; then
         echo "[ERROR] Failed to install torch/safetensors."
-        echo "  Run manually: pip3 install torch safetensors"
+        echo "  Activate your venv and run: pip install torch safetensors numpy packaging"
         exit 1
     fi
 fi

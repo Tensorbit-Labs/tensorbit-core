@@ -12,11 +12,12 @@ import argparse
 from pathlib import Path
 
 try:
+    import numpy as np
     import torch
     from safetensors.torch import save_file
 except ImportError as exc:
     raise SystemExit(
-        "Missing packages. Install: pip install torch safetensors"
+        "Missing packages. Install: pip install torch safetensors numpy packaging"
     ) from exc
 
 TENSORS = {

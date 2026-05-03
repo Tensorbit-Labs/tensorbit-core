@@ -124,7 +124,12 @@ tb-prune --model <PATH> [OPTIONS]
 ### Multi-Tensor Testing
 
 ```bash
-pip install torch safetensors
+# Install Python deps (use D: drive venv to save C: space):
+python3 -m venv /mnt/d/venv/tensorbit
+source /mnt/d/venv/tensorbit/bin/activate
+pip install torch safetensors numpy packaging --quiet
+
+# Run multi-tensor test:
 bash tests/multi_tensor/test_multi.sh
 # Expected: 5 .tb files produced, all with valid TB01 magic bytes
 ```
