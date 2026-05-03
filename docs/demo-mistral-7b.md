@@ -88,3 +88,8 @@ scp -r ubuntu@<ip>:~/tensorbit-core/build/pruned/ .
 - **tensorbit-distill** — teacher-student distillation (reads `.tbm`, writes updated `.tbm`)
 - **tensorbit-quant** — INT4/INT8 quantization (reads `.tbm`, writes quantized `.tbm`)
 - **tensorbit-run** — native GPU/CPU inference engine (reads `.tbm`, runs tokens)
+
+## Running Directly
+
+After running the pruned model directly through `tensorbit-run` without any further
+optimizations/compressions, 
