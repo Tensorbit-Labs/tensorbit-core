@@ -70,6 +70,15 @@ apt-get install -y -qq \
     libssl-dev
 
 # --- Install GCC 13 (required for std::vformat / std::make_format_args) ---
+# Ubuntu 22.04 ships GCC 11. We use the toolchain PPA to get GCC 13.
+# Use [trusted=yes] instead of add-apt-repository to avoid transient
+# Launchpad API 504s (Lambda cloud VMs frequently hit this).
+log "Adding toolchain PPA for GCC 13..."
+cat > /etc/apt/sources.list.d/ubuntu-toolchain-r.list <<'LISTEOF'
+deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main
+LISTEOF
+apt-get update -qq
+
 log "Installing GCC 13..."
 apt-get install -y -qq gcc-13 g++-13
 update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
