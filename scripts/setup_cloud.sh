@@ -92,6 +92,10 @@ update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
     --slave /usr/bin/g++ g++ /usr/bin/g++-13
 update-alternatives --set gcc /usr/bin/gcc-13
 
+# Remove the unsigned toolchain PPA so it doesn't break subsequent apt operations
+rm -f /etc/apt/sources.list.d/ubuntu-toolchain-r.list
+apt-get update -qq
+
 # --- Install latest CMake if needed ---
 CMAKE_VERSION=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || echo "0.0")
 CMAKE_MAJOR=$(echo "$CMAKE_VERSION" | cut -d. -f1)
