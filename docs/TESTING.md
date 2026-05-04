@@ -181,7 +181,7 @@ du -sh pruned/model.tbm                  # ~29 GB
 ### B9. Download Results (Laptop)
 
 ```bash
-scp -r ubuntu@<IP>:~/tensorbit-core/build/pruned/ .
+rsync -avh --progress ubuntu@<IP>:~/tensorbit-core/build/pruned/ .
 ```
 
 ### B10. Terminate (Browser)

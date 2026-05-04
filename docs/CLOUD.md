@@ -177,7 +177,7 @@ After pruning, transfer the output to your local machine:
 
 ```bash
 # From cloud to local
-scp user@cloud-ip:~/tensorbit-core/build/llama-2-7b-2of4.tb .
+rsync -avh --progress user@cloud-ip:~/tensorbit-core/build/llama-2-7b-2of4.tb .
 
 # Or using a cloud storage bucket
 gsutil cp llama-2-7b-2of4.tb gs://your-bucket/

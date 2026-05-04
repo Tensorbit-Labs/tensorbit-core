@@ -96,7 +96,7 @@ cmake --build . --target tb-run --parallel -j4
 
 ```bash
 # From laptop:
-scp -r ubuntu@<ip>:~/tensorbit-core/build/pruned/ .
+rsync -avh --progress ubuntu@<ip>:~/tensorbit-core/build/pruned/ .
 ```
 
 ## Next Steps
