@@ -223,9 +223,15 @@ if(TENSORBIT_BUILD_TESTS)
     target_include_directories(test_ehap
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     )
-    target_link_libraries(test_ehap
-        PRIVATE tensorbit-core
-    )
+    if(TENSORBIT_ENABLE_CUDA)
+        target_link_libraries(test_ehap
+            PRIVATE tensorbit-core tensorbit-core-cuda
+        )
+    else()
+        target_link_libraries(test_ehap
+            PRIVATE tensorbit-core
+        )
+    endif()
     add_test(NAME test_ehap COMMAND test_ehap)
     set_target_properties(test_ehap PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
@@ -238,9 +244,15 @@ if(TENSORBIT_BUILD_TESTS)
     target_include_directories(test_coring
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     )
-    target_link_libraries(test_coring
-        PRIVATE tensorbit-core
-    )
+    if(TENSORBIT_ENABLE_CUDA)
+        target_link_libraries(test_coring
+            PRIVATE tensorbit-core tensorbit-core-cuda
+        )
+    else()
+        target_link_libraries(test_coring
+            PRIVATE tensorbit-core
+        )
+    endif()
     add_test(NAME test_coring COMMAND test_coring)
     set_target_properties(test_coring PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
