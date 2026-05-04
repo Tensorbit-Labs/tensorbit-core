@@ -182,12 +182,38 @@ auto load_safetensor(loader::SafeTensorsFile& sf, const loader::TensorMeta& meta
     auto rd = sf.read_tensor_data(meta, buf);
     if (!rd) return unexpected(rd.error());
 
-    if (meta.dtype == loader::STDtype::kBF16 || meta.dtype == loader::STDtype::kF16) {
+    if (meta.dtype == loader::STDtype::kBF16) {
+        // BF16 → FP32: bfloat16 shares the FP32 exponent layout;
+        // the 16-bit value is the upper half of a 32-bit float.
         auto half = reinterpret_cast<const uint16_t*>(buf.data());
         auto fp32 = w.data();
         for (std::size_t i = 0; i < meta.numel; ++i) {
             uint32_t v = static_cast<uint32_t>(half[i]) << 16;
             std::memcpy(&fp32[i], &v, sizeof(float));
+        }
+    } else if (meta.dtype == loader::STDtype::kF16) {
+        // FP16 → FP32: proper IEEE 754 half-precision conversion.
+        // FP16: 1 sign | 5 exponent | 10 mantissa
+        // FP32: 1 sign | 8 exponent | 23 mantissa
+        auto half = reinterpret_cast<const uint16_t*>(buf.data());
+        auto fp32 = w.data();
+        for (std::size_t i = 0; i < meta.numel; ++i) {
+            uint16_t h   = half[i];
+            uint32_t sign = static_cast<uint32_t>((h >> 15) & 1) << 31;
+            int      exp  = (h >> 10) & 0x1F;
+            uint32_t mant = h & 0x3FF;
+            uint32_t f;
+            if (exp == 0) {
+                // Zero / subnormal: FP32 exponent = 0, left-shift mantissa
+                f = sign | (mant << 13);
+            } else if (exp == 31) {
+                // Inf or NaN: FP32 exponent = 0xFF, left-shift mantissa
+                f = sign | 0x7F800000 | (mant << 13);
+            } else {
+                // Normal: FP32 exponent = exp - 15 + 127 = exp + 112
+                f = sign | ((static_cast<uint32_t>(exp + 112) << 23) | (mant << 13));
+            }
+            std::memcpy(&fp32[i], &f, sizeof(float));
         }
     } else {
         std::memcpy(w.data(), buf.data(), meta.length);

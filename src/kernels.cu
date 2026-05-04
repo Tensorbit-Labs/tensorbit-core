@@ -89,6 +89,20 @@ __global__ void fisher_accumulate_kernel(float* __restrict__       fisher_diag,
 }
 
 // ---------------------------------------------------------------------------
+// Kernel: fisher_beta_decay
+// ---------------------------------------------------------------------------
+
+/// @brief CUDA kernel: applies EMA decay factor to the Fisher diagonal.
+/// F[i] = beta * F[i]  on the device directly, eliminating the previous
+/// host round-trip (device→host→multiply→host→device).
+__global__ void fisher_beta_decay_kernel(float* __restrict__ fisher_diag,
+                                         float beta, std::size_t N) {
+    std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    fisher_diag[idx] *= beta;
+}
+
+// ---------------------------------------------------------------------------
 // Kernel: ehap_importance
 // ---------------------------------------------------------------------------
 
@@ -347,6 +361,18 @@ void launch_fisher_accumulate(float*       fisher_diag,
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     int grid = get_grid_blocks(N);
     fisher_accumulate_kernel<<<grid, kThreadsPerBlock, 0, s>>>(fisher_diag, gradients, N, alpha);
+}
+
+// --- Fisher Beta Decay ---
+
+void launch_fisher_beta_decay(float*       fisher_diag,
+                              float        beta,
+                              std::size_t  N,
+                              void*        stream) {
+    if (N == 0) return;
+    cudaStream_t s = static_cast<cudaStream_t>(stream);
+    int grid = get_grid_blocks(N);
+    fisher_beta_decay_kernel<<<grid, kThreadsPerBlock, 0, s>>>(fisher_diag, beta, N);
 }
 
 // --- EHAP Importance ---

@@ -41,6 +41,18 @@ void launch_fisher_accumulate(float*       fisher_diag,
                               float        alpha,
                               void*        stream);
 
+/// @brief GPU kernel: applies EMA decay factor to the Fisher diagonal.
+/// F[i] = beta * F[i] on the device, avoiding host round-trip.
+///
+/// @param fisher_diag Device pointer to Fisher diagonal (modified in-place).
+/// @param beta        Decay factor.
+/// @param N           Number of elements.
+/// @param stream      CUDA stream handle.
+void launch_fisher_beta_decay(float*       fisher_diag,
+                              float        beta,
+                              std::size_t  N,
+                              void*        stream);
+
 /// @brief GPU kernel: computes EHAP importance scores.
 /// s[i] = w[i]^2 * (F[i] + damping)
 ///

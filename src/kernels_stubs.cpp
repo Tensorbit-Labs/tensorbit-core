@@ -28,6 +28,11 @@ void launch_fisher_accumulate(float*       /*fisher_diag*/,
                               float        /*alpha*/,
                               void*        /*stream*/) {}
 
+void launch_fisher_beta_decay(float*       /*fisher_diag*/,
+                              float        /*beta*/,
+                              std::size_t  /*N*/,
+                              void*        /*stream*/) {}
+
 void launch_ehap_importance(const float* /*weights*/,
                             const float* /*fisher_diag*/,
                             float*       /*importance*/,

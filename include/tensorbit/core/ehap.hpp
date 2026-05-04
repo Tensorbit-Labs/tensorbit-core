@@ -167,17 +167,11 @@ public:
         if constexpr (std::is_same_v<F, float>) {
             if (gradients.device() == DeviceLocation::kDevice) {
                 // First step: initialise Fisher from gradients.
-                // Subsequent steps: apply beta decay via host copy
-                // (FIXME: move beta decay into a dedicated GPU kernel).
+                // Subsequent steps: apply beta decay directly on GPU
                 if (step_count_ > 0) {
-                    auto h = fisher_diag_.to_host();
-                    F* fd = h.data();
-                    std::size_t N = h.size();
-                    for (std::size_t i = 0; i < N; ++i) fd[i] *= beta;
-#ifdef TENSORBIT_ENABLE_CUDA
-                    CUDA_CHECK(cudaMemcpy(fisher_diag_.data(), h.data(),
-                                          N * sizeof(F), cudaMemcpyHostToDevice));
-#endif
+                    kernels::launch_fisher_beta_decay(
+                        fisher_diag_.data(), beta, fisher_diag_.size(), nullptr);
+                    CUDA_SYNC_CHECK();
                 }
                 F gpu_alpha = (step_count_ == 0) ? alpha : alpha * one_m_beta;
                 kernels::launch_fisher_accumulate(
