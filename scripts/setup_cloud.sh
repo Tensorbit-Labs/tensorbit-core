@@ -50,6 +50,12 @@ if [[ "$ID" != "ubuntu" ]]; then
     exit 1
 fi
 
+# --- Clean up stale sources from prior failed provisioning attempts ---
+# These can survive across git clones on the same VM and will cause apt-get
+# update to fail before the script ever reaches the GCC section.
+log "Cleaning up any stale sources from prior runs..."
+rm -f /etc/apt/sources.list.d/ubuntu-toolchain-r*
+
 # --- System Dependencies ---
 log "Updating package lists..."
 apt-get update -qq
@@ -73,9 +79,8 @@ apt-get install -y -qq \
 # Ubuntu 22.04 ships GCC 11. We use the toolchain PPA to get GCC 13.
 # Use command-line flags instead of add-apt-repository to avoid transient
 # Launchpad API 504s (Lambda cloud VMs frequently hit this).
-# Also remove any stale PPA entries left by prior failed add-apt-repository runs.
+# Stale PPA entries were already removed in the cleanup section above.
 log "Adding toolchain PPA for GCC 13..."
-rm -f /etc/apt/sources.list.d/ubuntu-toolchain-r*
 cat > /etc/apt/sources.list.d/ubuntu-toolchain-r.list <<'LISTEOF'
 deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main
 LISTEOF
