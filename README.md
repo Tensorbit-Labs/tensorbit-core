@@ -46,12 +46,15 @@ C++20, CUDA 12, Eigen3, GCC 13+ / Clang 16+ / MSVC 2022
 
 | Document | Purpose |
 |----------|---------|
-| [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) | Complete user manual — installation, building, CLI flags, examples, troubleshooting |
-| [`docs/CLOUD.md`](docs/CLOUD.md) | Cloud GPU deployment — A100/H100 setup, providers, pruning real LLMs |
+| [`docs/TESTING.md`](docs/TESTING.md) | Complete testing guide — local WSL tests through cloud A100 pruning |
+| [`docs/demo-mistral-7b.md`](docs/demo-mistral-7b.md) | Mistral 7B pruning demo — step-by-step Lambda A100 workflow |
+| [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) | User manual — installation, building, CLI flags, examples, troubleshooting |
+| [`docs/CLOUD.md`](docs/CLOUD.md) | Cloud GPU deployment — A100/H100 setup, providers, cost estimates |
 | [`docs/EHAP.md`](docs/EHAP.md) | EHAP algorithm — mathematical derivation, all equations, 10 references |
 | [`docs/CORING.md`](docs/CORING.md) | CORING algorithm — N:M sparsity design, mask strategies, 8 references |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Project internals — directory layout, dependency graph, design decisions, format specs |
 | [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) | High-level algorithm overview and pipeline walkthrough |
+| [`docs/TODO.md`](docs/TODO.md) | Remaining enhancements, known gaps, future roadmap |
 
 ## License
 
