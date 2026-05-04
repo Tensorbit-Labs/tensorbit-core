@@ -18,7 +18,7 @@ sudo apt install -y build-essential cmake libeigen3-dev
 Verify:
 
 ```bash
-bash verify_ubuntu.sh
+bash scripts/verify_ubuntu.sh
 ```
 
 All checks should show **[OK]** except CUDA (`nvcc`) — that is expected unless you

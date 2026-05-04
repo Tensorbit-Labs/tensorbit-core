@@ -22,7 +22,6 @@ tensorbit-core/
 ├── .gitignore                        # Build artifacts, logs, .tb files, model weights
 ├── README.md                         # Project overview and usage
 ├── format.sh                         # Clang-format runner (prerequisite check)
-├── verify_ubuntu.sh                  # WSL/Ubuntu environment diagnostic tool
 │
 ├── include/
 │   └── tensorbit/
@@ -49,8 +48,9 @@ tensorbit-core/
 │   └── test_all.sh                   # Test runner (prereq checks, --skip-gpu, --clean)
 │
 ├── scripts/
-│   ├── setup_cloud.sh                # Ubuntu 22.04 provisioning (CUDA 12, Eigen3)
-│   └── download_model.py             # HuggingFace .safetensors downloader
+│   ├── setup_cloud.sh                # Ubuntu 22.04 provisioning (CUDA 12, Eigen3, Python)
+│   ├── download_model.py             # HuggingFace .safetensors downloader
+│   └── verify_ubuntu.sh              # WSL/Ubuntu environment diagnostic tool
 │
 ├── docs/
 │   ├── ARCHITECTURE.md               # This file

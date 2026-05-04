@@ -1,171 +1,68 @@
 # Local Testing Guide (No GPU Required)
 
-This guide describes how to build, test, and run Tensorbit Core on a laptop or
-desktop without an NVIDIA GPU, using the CPU-only path via WSL/Ubuntu.
+This guide describes how to build, test, and run Tensorbit Core and Tensorbit Run
+on a laptop or desktop without an NVIDIA GPU, using the CPU-only path via WSL/Ubuntu.
 
 ---
 
 ## Prerequisites
 
-WSL2 Ubuntu 24.04 or bare Ubuntu 22.04+ with:
-
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake libeigen3-dev
+
+# Verify environment
+bash scripts/verify_ubuntu.sh
 ```
 
-Verify with:
-
-```bash
-bash verify_ubuntu.sh
-```
-
-All checks should show **[OK]** except nvcc (expected — you have no GPU).
+All checks should show [OK] except CUDA (expected — no GPU).
 
 ---
 
-## Step 1: Run the Unit Tests
+## Complete Final Local Test
+
+### Phase A: tensorbit-core (5 minutes)
 
 ```bash
+# 1. Unit tests
 cd /mnt/d/Dev/tensorbit_labs/tensorbit-core
 bash tests/test_all.sh --skip-gpu --clean
-```
+# Expected: 30/30 passed
 
-Expected: **14/14 tests passed** (7 EHAP + 7 CORING).
-
-If any fail, see `docs/DOCUMENTATION.md` for troubleshooting.
-
----
-
-## Step 2: Build the CLI Tool
-
-The test script builds `test_ehap` and `test_coring` but not `tb-prune`.
-Build it separately:
-
-```bash
+# 2. Build CLI
 cd build
 cmake .. -DTENSORBIT_ENABLE_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build . --target tb-prune --parallel -j4
-```
 
-The binary lands at `build/bin/tb-prune`.
-
----
-
-## Step 3: Run a Mock Pruning Job
-
-The CLI can operate on randomly-generated "mock" tensors — no model download needed:
-
-```bash
-cd build
+# 3. Single mock tensor
 ./bin/tb-prune --mock-size 16384 --sparsity 2:4 --output demo.tb
+
+# 4. Multi-tensor test
+cd ..
+source /mnt/d/venv/tensorbit/bin/activate
+bash tests/multi_tensor/test_multi.sh
+# Expected: 5 .tb files + model.tbm produced
+
+# 5. Merge test
+bash tests/merge/test_merge.sh
+# Expected: 6 .tb files merged into valid .tbm
 ```
 
-This runs the full pipeline:
-1. Generate a random 16,384-element weight tensor
-2. EHAP: accumulate Fisher → compute importance → select mask → apply
-3. CORING: generate 2:4 mask → apply → redistribute
-4. Save to `demo.tb`
-
-**Expected output:**
-
-```
-[INFO] Tensorbit Core v0.2.0 — Pruning Pipeline
-[INFO]   Output: demo.tb
-[INFO] [Load] Generating mock weight tensor (16384 elements)
-[INFO]   Total weights: 16384 (0.06 MB FP32)
-[INFO] [EHAP] Computing importance scores...
-[INFO]   EHAP pruned: 8192 weights (50.0%)
-[INFO] [CORING] Applying N:M structured sparsity...
-[INFO]   CORING (2/4): 8192 weights pruned (50.0% sparsity)
-[INFO] [Save] Writing .tb file...
-[INFO]   Saved to 'demo.tb' (68.06 KB)
-[INFO] [Verify] .tb file valid: magic=0x31304254, v1, 2/4 sparsity, 16384 weights
-[INFO] Done.
-```
-
----
-
-## Step 4: Verify the .tb File
-
-The output is a valid Tensorbit Binary file:
+### Phase B: tensorbit-run (5 minutes)
 
 ```bash
-ls -la demo.tb
-# Expected: 73728 bytes (72 KB)
+cd /mnt/d/Dev/tensorbit_labs/tensorbit-run/build
+cmake .. -DTENSORBIT_BACKEND_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build . --target tb-run --parallel -j4
 
-# Inspect the binary header:
-xxd demo.tb | head -8
+# 6. Unit tests
+bash ../tests/test_all.sh
+# Expected: 88/88 passed
+
+# 7. End-to-end inference
+./tb-run --model ../../tensorbit-core/tests/multi_tensor/output/model.tbm \
+    --prompt "hello" --max-tokens 5
+# Expected: EXIT 0, no crash
 ```
 
-**Reading the header:**
-
-| Bytes | Field | Expected | What it means |
-|-------|-------|----------|---------------|
-| `54 42 30 31` | magic | TB01 | Valid .tb file |
-| `01 00 00 00` | version | 1 | Format version 1 |
-| `0N 00 00 00` | nm_n | N | Kept per group |
-| `0M 00 00 00` | nm_m | M | Group size |
-| `XX XX 00 00` | num_weights | N_elements | Total weights |
-| `YY YY 00 00` | num_mask_bytes | N_elements/M | Mask data size |
-
-The file size should be exactly `4096 + N_elements * 4 + N_elements / M` bytes
-(4096 header + FP32 weights + 1 byte per mask group).
-
-For `--sparsity 2:4` with 16384 elements: 4096 + 65536 + 4096 = 73728 bytes. ✅
-
----
-
-## Advanced Mock Options
-
-| Flag | Description | Example |
-|------|-------------|---------|
-| `--mock-size N` | Elements in mock tensor | `--mock-size 65536` |
-| `--sparsity N:M` | N:M pattern | `--sparsity 1:4` |
-| `--strategy NAME` | Pruning strategy | `--strategy BlockOBS` |
-| `--damping VAL` | Fisher damping | `--damping 0.02` |
-| `--output PATH` | Output path | `--output my_model.tb` |
-
-**BlockOBS (research-grade):**
-
-```bash
-./bin/tb-prune --mock-size 16384 --sparsity 2:4 --strategy BlockOBS --output demo_obs.tb
-```
-
-**Iterative pruning:**
-
-```bash
-./bin/tb-prune --mock-size 16384 --sparsity 2:4 --strategy Iterative --output demo_iter.tb
-```
-
----
-
-## Memory Limits on a Laptop
-
-The mock tensor size is limited by your system RAM. On an 8 GB laptop:
-
-| `--mock-size` | Weight memory | Total peak | Safe? |
-|--------------|--------------|------------|-------|
-| 4,096 | 16 KB | ~1 MB | Yes |
-| 65,536 | 256 KB | ~5 MB | Yes |
-| 1,048,576 | 4 MB | ~50 MB | Yes |
-| 16,777,216 | 64 MB | ~500 MB | Yes |
-| 67,108,864 | 256 MB | ~2 GB | Maybe |
-
-For real LLM pruning (7B+ parameters), you need a cloud GPU — see `docs/DOCUMENTATION.md`.
-
----
-
-## Cleaning Up
-
-```bash
-# Delete build artifacts
-cd /mnt/d/Dev/tensorbit_labs/tensorbit-core
-rm -rf build/
-
-# Delete generated .tb files
-rm -f demo*.tb
-
-# Fresh rebuild
-bash tests/test_all.sh --skip-gpu --clean
-```
+If all 7 steps pass, you are ready for the Lambda cloud test.

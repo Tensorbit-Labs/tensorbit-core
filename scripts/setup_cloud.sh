@@ -104,8 +104,8 @@ if ! command -v nvcc &>/dev/null; then
 
     # Add CUDA to PATH
     cat > /etc/profile.d/cuda.sh <<'EOF'
-export PATH=/usr/local/cuda-12/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:$LD_LIBRARY_PATH
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 EOF
     log "CUDA 12 installed. Reboot or run 'source /etc/profile.d/cuda.sh' to activate."
 else
@@ -150,6 +150,7 @@ pip install --quiet \
     torchvision \
     safetensors \
     numpy \
+    packaging \
     huggingface_hub \
     click 2>/dev/null || {
     warn "Some pip packages may have failed. Check network connection and retry."
