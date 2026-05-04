@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
 # Suppress CMP0144 warning (EIGEN3_ROOT vs Eigen3_ROOT)
-cmake_policy(SET CMP0144 OLD)
+# Guarded: CMP0144 only exists in CMake >= 3.27
+if(POLICY CMP0144)
+    cmake_policy(SET CMP0144 OLD)
+endif()
 
 # -----------------------------------------------------------------------------
 # Project Identity
@@ -144,6 +147,7 @@ target_link_libraries(tensorbit-core
 # When CUDA is disabled, kernel launch stubs are compiled instead.
 if(TENSORBIT_ENABLE_CUDA)
     target_compile_definitions(tensorbit-core PUBLIC TENSORBIT_ENABLE_CUDA)
+    target_link_libraries(tensorbit-core PUBLIC CUDA::cudart)
 else()
     target_sources(tensorbit-core PRIVATE src/kernels_stubs.cpp)
 endif()

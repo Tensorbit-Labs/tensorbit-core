@@ -20,7 +20,7 @@
 // Conditional CUDA Support
 // ---------------------------------------------------------------------------
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(TENSORBIT_ENABLE_CUDA)
 #include <cuda_runtime.h>
 #endif
 

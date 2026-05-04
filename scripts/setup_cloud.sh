@@ -101,8 +101,8 @@ CMAKE_VERSION=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || echo
 CMAKE_MAJOR=$(echo "$CMAKE_VERSION" | cut -d. -f1)
 CMAKE_MINOR=$(echo "$CMAKE_VERSION" | cut -d. -f2)
 
-if [[ "$CMAKE_MAJOR" -lt 3 || ("$CMAKE_MAJOR" -eq 3 && "$CMAKE_MINOR" -lt 22) ]]; then
-    log "CMake $CMAKE_VERSION is too old. Installing 3.28+ via Kitware repo..."
+if [[ "$CMAKE_MAJOR" -lt 3 || ("$CMAKE_MAJOR" -eq 3 && "$CMAKE_MINOR" -lt 27) ]]; then
+    log "CMake $CMAKE_VERSION is too old (< 3.27). Installing 3.28+ via Kitware repo..."
     wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
         | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
