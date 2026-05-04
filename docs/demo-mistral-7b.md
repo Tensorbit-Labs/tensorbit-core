@@ -28,7 +28,7 @@ so tensorbit-run can load the entire model in a single memory-mapped file.
 
 ```bash
 ssh ubuntu@<instance-ip>
-git clone https://github.com/thepeeps191/tensorbit-core
+git clone https://github.com/Tensorbit-Labs/tensorbit-core
 cd tensorbit-core
 sudo ./scripts/setup_cloud.sh
 sudo reboot
