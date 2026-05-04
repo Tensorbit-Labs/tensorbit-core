@@ -1,7 +1,7 @@
 # Tensorbit Core Pruning Demo — Mistral 7B
 
 This demo prunes [Mistral 7B v0.1](https://huggingface.co/mistralai/Mistral-7B-v0.1)
-with 2:4 structured sparsity using the BlockOBS strategy on a single NVIDIA A100 GPU.
+with 2:4 structured sparsity using the Iterative strategy on a single NVIDIA A100 GPU.
 Outputs both individual `.tb` files and a `.tbm` container ready for tensorbit-run.
 
 ## Pipeline: Core → Run
@@ -21,8 +21,8 @@ so tensorbit-run can load the entire model in a single memory-mapped file.
 | CPU | 30 vCPU, 225 GiB RAM |
 | Storage | 512 GiB SSD |
 | Cost | $1.99/hr |
-| Time | ~25-40 minutes |
-| Total | ~$1.50 |
+| Time | ~5-10 minutes |
+| Total | ~$0.30 |
 
 ## Setup
 
@@ -51,18 +51,18 @@ The model has 2 HuggingFace shards. Prune each separately, then merge:
 ```bash
 cd build
 
-# Shard 1 (~150 tensors, ~22 min)
+# Shard 1 (~150 tensors, ~2-4 min)
 ./bin/tb-prune \
     --model ../models/mistral-7b/model-00001-of-00002.safetensors \
     --sparsity 2:4 \
-    --strategy BlockOBS \
+    --strategy Iterative \
     --output ./pruned/1/
 
-# Shard 2 (~150 tensors, ~22 min)
+# Shard 2 (~150 tensors, ~2-4 min)
 ./bin/tb-prune \
     --model ../models/mistral-7b/model-00002-of-00002.safetensors \
     --sparsity 2:4 \
-    --strategy BlockOBS \
+    --strategy Iterative \
     --output ./pruned/2/
 
 # Merge into single .tbm
