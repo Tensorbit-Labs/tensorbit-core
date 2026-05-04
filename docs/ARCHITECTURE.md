@@ -484,9 +484,3 @@ diagonal is kept until pruning completes, then freed via `reset()`.
 | Future | FP16/BF16 CUDA kernels | 🔜 |
 | Future | cuSPARSELt integration for direct sparse matmul | 🔜 |
 | Future | `tensorbit-run` standalone inference engine | 🔜 |
-
----
-
-## License
-
-Apache License 2.0 — Tensorbit Labs
