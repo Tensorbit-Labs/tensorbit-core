@@ -5,7 +5,7 @@
 # Run this from anywhere. It reports what you have and what's missing.
 #
 # Usage:
-#   bash verify_ubuntu.sh
+#   bash scripts/verify_ubuntu.sh
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
