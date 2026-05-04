@@ -121,6 +121,22 @@ std::string sanitise_name(std::string_view name) {
     return out;
 }
 
+/// JSON-escape a string (replace " with \", \ with \\, etc.).
+std::string json_escape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
 /// Build EHAPConfig from CLI flags.
 EHAPConfig make_ehap_config(const CliConfig& cfg) {
     EHAPConfig c;
@@ -505,12 +521,13 @@ int main(int argc, char* argv[]) {
 
                 // JSON entry with full metadata
                 json += sep;
+                auto escaped_name = json_escape(entry.name);
                 auto nw = std::to_string(entry.num_weights);
                 auto nmb = std::to_string(entry.num_mask_bytes);
                 auto off = std::to_string(offset);
                 auto s0 = std::to_string(entry.shape_0);
                 auto s1 = std::to_string(entry.shape_1);
-                json += "{\"name\":\"" + entry.name + "\",";
+                json += "{\"name\":\"" + escaped_name + "\",";
                 json += "\"offset\":" + off + ",";
                 json += "\"shape\":[" + s0 + "," + s1 + "],";
                 json += "\"nm_n\":" + std::to_string(entry.nm_n) + ",";

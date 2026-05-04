@@ -99,37 +99,47 @@ ninja
 
 ```bash
 ./bin/tb-prune \
-    --model ../models/mistral-7b/consolidated.safetensors \
+    --model ../models/mistral-7b/model-00001-of-00002.safetensors \
     --sparsity 2:4 \
     --strategy BlockOBS \
-    --output ./pruned/
-# ~25-40 minutes — outputs ~300 .tb files + model.tbm (~29 GB)
+    --output ./pruned/1/
+
+./bin/tb-prune \
+    --model ../models/mistral-7b/model-00002-of-00002.safetensors \
+    --sparsity 2:4 \
+    --strategy BlockOBS \
+    --output ./pruned/2/
+
+# Merge shards
+python ../scripts/merge_tbm.py \
+    --input ./pruned/1/ ./pruned/2/ \
+    --output ./pruned/model.tbm
+# ~25-40 minutes per shard — outputs merged model.tbm (~29 GB)
 ```
 
 ### Step 6: Verify (Cloud)
 
 ```bash
-ls pruned/*.tb | wc -l          # Expected: ~300
-xxd pruned/model.tbm | tail -12 # JSON index visible at end
-du -sh pruned/model.tbm         # ~29 GB
+ls pruned/1/*.tb pruned/2/*.tb | wc -l  # Expected: ~300 total
+xxd pruned/model.tbm | tail -12         # JSON index visible at end
+du -sh pruned/model.tbm                  # ~29 GB
 ```
 
-### Step 7: Download (Laptop)
-
-```bash
-# From your laptop terminal:
-scp -r ubuntu@<IP>:~/tensorbit-core/build/pruned/ .
-```
-
-### Step 8: Terminate (Browser)
+### Step 7: Terminate (Browser)
 
 Lambda dashboard → Stop/Terminate → **stops billing immediately.**
+
+### Step 8: Download (Laptop)
+
+```bash
+scp -r ubuntu@<IP>:~/tensorbit-core/build/pruned/ .
+```
 
 ### Step 9: Run Inference Locally (Laptop)
 
 ```bash
 cd /mnt/d/Dev/tensorbit_labs/tensorbit-run/build
-./tb-run --model /path/to/pruned/model.tbm --prompt "The capital of France is" --max-tokens 20
+./tb-run --model pruned/model.tbm --prompt "The capital of France is" --max-tokens 20
 ```
 
 ---
