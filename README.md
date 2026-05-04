@@ -58,4 +58,7 @@ C++20, CUDA 12, Eigen3, GCC 13+ / Clang 16+ / MSVC 2022
 
 ## License
 
-Apache License 2.0 — Tensorbit Labs
+This project is **dual-licensed**.
+- Open source use: Licensed under the [GNU AGPLv3](LICENSE). You may use, modify, and distribute the code under the terms of the AGPL, which requires all modifications and larger works to be licensed under the same license and requires making source code available to network users.
+
+- Commercial use: If you wish to use this library in a proprietary product without the copyleft obligations of the AGPL, a separate commercial license is available. Please contact us for details.
