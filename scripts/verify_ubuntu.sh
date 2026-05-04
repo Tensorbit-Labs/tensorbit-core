@@ -56,7 +56,7 @@ echo ""
 info "2. WSL Detection"
 if grep -qi microsoft /proc/version 2>/dev/null; then
     ok "Running inside WSL"
-    WSL_VERSION=$(wsl.exe --version 2>/dev/null | head -1 || echo "unknown")
+    WSL_VERSION=$(wsl.exe --version 2>/dev/null | tr -d '\0' | head -1 || echo "unknown")
     echo "   ${WSL_VERSION}"
     dpath=$(wslpath -w "$(pwd)" 2>/dev/null || echo "n/a")
     echo "   Current dir maps to: ${dpath}"
