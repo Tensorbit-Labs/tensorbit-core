@@ -60,8 +60,7 @@ bash ../tests/test_all.sh
 # Expected: 88/88 passed
 
 # 7. End-to-end inference
-./tb-run --model ../../tensorbit-core/tests/multi_tensor/output/model.tbm \
-    --prompt "hello" --max-tokens 5
+./tb-run --model ../../tensorbit-core/tests/multi_tensor/output/model.tbm --prompt "hello" --max-tokens 5
 # Expected: EXIT 0, no crash
 ```
 

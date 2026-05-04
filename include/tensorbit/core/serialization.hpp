@@ -160,7 +160,7 @@ private:
 
 /// @brief Deserializes a `.tb` file, extracting weights and masks.
 ///
-/// Provides a `read_mmap()` stub for future zero-copy memory-mapped loading.
+/// Uses std::ifstream binary I/O with seek + read for random layer access.
 class TBReader {
 public:
     TBReader()  = default;
