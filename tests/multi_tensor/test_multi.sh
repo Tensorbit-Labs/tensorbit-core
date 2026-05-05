@@ -27,11 +27,9 @@ echo ""
 # --- Check prerequisites ---
 PYTHON=""
 
-# Prefer D: drive venv (where user has torch installed)
-for candidate in \
-    "/mnt/d/venv/tensorbit/bin/python3" \
-    "/mnt/d/venv/tensorbit/bin/python"; do
-    if [[ -x "$candidate" ]]; then
+# Check for working Python 3 with torch
+for candidate in python3 python; do
+    if command -v "$candidate" &>/dev/null; then
         PYTHON="$candidate"
         break
     fi

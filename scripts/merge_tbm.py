@@ -115,7 +115,7 @@ def build_json_tensors(tb_files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def write_tbm(output_path: Path, tb_files: List[Dict[str, Any]],
-              tensors: List[Dict[str, Any]]):
+               tensors: List[Dict[str, Any]], architecture: str = "llama"):
     """Write the merged .tbm file."""
     with open(output_path, "wb") as f:
         # Write each .tb file's contents in order
@@ -127,7 +127,7 @@ def write_tbm(output_path: Path, tb_files: List[Dict[str, Any]],
 
         # Build and write JSON index
         json_index = json.dumps({
-            "architecture": "llama",
+            "architecture": architecture,
             "config": {
                 "num_layers": len(tensors),
             },
@@ -210,7 +210,7 @@ def main():
     # Write merged .tbm
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    write_tbm(output_path, tb_files, tensors)
+    write_tbm(output_path, tb_files, tensors, args.architecture)
 
 
 if __name__ == "__main__":

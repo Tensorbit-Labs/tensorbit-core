@@ -59,11 +59,20 @@ struct CliConfig {
     std::string_view output_path{"output.tb"};
     std::string_view method{"EHAP"};
     std::string_view strategy{"OneShot"};
+    std::string_view architecture{"llama"};
     int              nm_n{2};
     int              nm_m{4};
     float            damping{0.01f};
     float            sparsity_ratio{0.5f};
     std::size_t      mock_size{4096};
+    int              hidden_size{4096};
+    int              num_heads{32};
+    int              num_kv_heads{8};
+    int              intermediate_size{14336};
+    int              vocab_size{32000};
+    int              max_seq_len{2048};
+    float            norm_eps{1e-5f};
+    float            rope_theta{10000.0f};
     bool             use_mock{false};
     bool             show_help{false};
     bool             show_version{false};
@@ -86,6 +95,13 @@ void print_usage(const char* prog_name) {
         "  --output PATH     Output .tb path (mock) or dir (real) [default: output.tb]\n"
         "  --method NAME     EHAP | Magnitude                   [default: EHAP]\n"
         "  --strategy NAME   OneShot | Iterative | BlockOBS     [default: OneShot]\n"
+        "  --architecture A  Model architecture name              [default: llama]\n"
+        "  --hidden-size N   Hidden dimension                     [default: 4096]\n"
+        "  --num-heads N     Attention heads                      [default: 32]\n"
+        "  --num-kv-heads N  Key-value heads (GQA)                [default: 8]\n"
+        "  --intermediate N  MLP intermediate size                [default: 14336]\n"
+        "  --vocab-size N    Vocabulary size                      [default: 32000]\n"
+        "  --max-seq-len N   Maximum sequence length              [default: 2048]\n"
         "  --damping VAL     EHAP Fisher damping                [default: 0.01]\n"
         "  --mock-size N     Elements in mock weight tensor     [default: 4096]\n"
         "  --help, -h        Print this help\n"
@@ -126,12 +142,24 @@ std::string json_escape(std::string_view s) {
     std::string out;
     out.reserve(s.size() + 4);
     for (char c : s) {
-        switch (c) {
+        auto uc = static_cast<unsigned char>(c);
+        switch (uc) {
             case '"':  out += "\\\""; break;
             case '\\': out += "\\\\"; break;
             case '\n': out += "\\n";  break;
             case '\t': out += "\\t";  break;
-            default:   out += c;      break;
+            case '\r': out += "\\r";  break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            default:
+                if (uc < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04X", uc);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
         }
     }
     return out;
@@ -281,7 +309,33 @@ int main(int argc, char* argv[]) {
             cfg.method = next_val();
         else if (arg == "--strategy")
             cfg.strategy = next_val();
-        else if (arg == "--damping") {
+        else if (arg == "--architecture")
+            cfg.architecture = next_val();
+        else if (arg == "--hidden-size") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.hidden_size);
+        } else if (arg == "--num-heads") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.num_heads);
+        } else if (arg == "--num-kv-heads") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.num_kv_heads);
+        } else if (arg == "--intermediate-size") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.intermediate_size);
+        } else if (arg == "--vocab-size") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.vocab_size);
+        } else if (arg == "--max-seq-len") {
+            auto val = next_val();
+            if (!val.empty())
+                std::from_chars(val.data(), val.data() + val.size(), cfg.max_seq_len);
+        } else if (arg == "--damping") {
             auto val = next_val();
             if (!val.empty())
                 std::from_chars(val.data(), val.data() + val.size(), cfg.damping);
@@ -516,18 +570,20 @@ int main(int argc, char* argv[]) {
         } else {
             // 1. Concatenate .tb file contents + build JSON index
             std::string json = "{";
-            json += "\"architecture\":\"llama\",";
+            auto arch_name = std::string(cfg.architecture);
+            json += "\"architecture\":\"" + json_escape(arch_name) + "\",";
             json += "\"config\":{";
             json += "\"num_layers\":" + std::to_string(tensor_count);
-            json += ",\"hidden_size\":512";
-            json += ",\"num_heads\":8";
-            json += ",\"num_kv_heads\":4";
-            json += ",\"head_dim\":64";
-            json += ",\"intermediate_size\":2048";
-            json += ",\"vocab_size\":256";
-            json += ",\"max_seq_len\":128";
-            json += ",\"norm_eps\":1e-5";
-            json += ",\"rope_theta\":10000";
+            json += ",\"hidden_size\":" + std::to_string(cfg.hidden_size);
+            json += ",\"num_heads\":" + std::to_string(cfg.num_heads);
+            json += ",\"num_kv_heads\":" + std::to_string(cfg.num_kv_heads);
+            json += ",\"intermediate_size\":" + std::to_string(cfg.intermediate_size);
+            json += ",\"vocab_size\":" + std::to_string(cfg.vocab_size);
+            json += ",\"max_seq_len\":" + std::to_string(cfg.max_seq_len);
+            auto eps_str = std::to_string(cfg.norm_eps);
+            json += ",\"norm_eps\":" + eps_str;
+            auto rope_str = std::to_string(cfg.rope_theta);
+            json += ",\"rope_theta\":" + rope_str;
             json += "},\"tensors\":[";
             std::string_view sep;
 

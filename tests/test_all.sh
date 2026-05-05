@@ -132,7 +132,7 @@ else
     for candidate in \
         /usr/include/eigen3/Eigen/Core \
         /usr/local/include/eigen3/Eigen/Core \
-        /mnt/d/eigen3/Eigen/Core \
+        /opt/homebrew/include/eigen3/Eigen/Core \
         "$ROOT_DIR/third_party/eigen/Eigen/Core"; do
         if [[ -f "$candidate" ]]; then
             log_info "Eigen3 auto-detected at: $(dirname "$(dirname "$candidate")")"
@@ -143,8 +143,9 @@ else
     done
     if [[ "$EIGEN_FOUND" -eq 0 ]]; then
         log_error "Eigen3 not found. Provide it with --eigen3-root <path>."
-        log_error "  Install: sudo apt install libeigen3-dev"
-        log_error "       or: git clone https://gitlab.com/libeigen/eigen.git D:/eigen3"
+        log_error "  Install: sudo apt install libeigen3-dev (Ubuntu/Debian)"
+        log_error "       or: brew install eigen (macOS)"
+        log_error "       or: git clone https://gitlab.com/libeigen/eigen.git <path>"
         log_error "       or: git clone https://gitlab.com/libeigen/eigen.git /usr/local/include/eigen3"
         MISSING=1
     fi

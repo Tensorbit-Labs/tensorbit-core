@@ -43,8 +43,10 @@ if(TENSORBIT_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
-    # Target NVIDIA A100 (SM80) and H100 (SM90)
-    set(CMAKE_CUDA_ARCHITECTURES "80;90")
+    # Target common GPU architectures.  Override with -DCMAKE_CUDA_ARCHITECTURES="75;86;89;...".
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "80;90")
+    endif()
 
     # Required: CUDA Toolkit >= 12.0
     find_package(CUDAToolkit 12.0 REQUIRED)

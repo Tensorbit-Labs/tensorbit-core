@@ -241,7 +241,7 @@ echo ""
 echo "${GREEN}Environment looks good for CPU-only builds.${NC}"
 echo ""
 echo "Run the tests with:"
-echo "  cd /mnt/d/Dev/tensorbit_labs/tensorbit-core"
+echo "  cd $(pwd)"
 echo "  bash tests/test_all.sh --skip-gpu --clean"
 echo ""
 exit 0
