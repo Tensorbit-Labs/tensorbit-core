@@ -86,18 +86,26 @@ def read_shard_metadata(input_dir: str) -> Dict[str, dict]:
 
 
 def infer_hidden_size(tb_files: List[Dict[str, Any]], shard_meta: Dict[str, dict]) -> int:
-    """Find the model hidden size from a square attention projection matrix."""
+    """Find the model hidden size from a square attention projection matrix.
+       Prioritises q_proj / o_proj (always [hidden, hidden]).
+       Falls back to k_proj / v_proj (smaller square in GQA models)."""
+    primary = []
+    fallback = []
     for entry in tb_files:
-        name = entry["name"]
+        name = entry["name"].lower()
         nw = entry["header"]["num_weights"]
         h = int(math.isqrt(nw))
         if h * h != nw or h < 512:
             continue
-        # Check if this is an attention projection (square matrix)
-        name_low = name.lower()
-        if any(k in name_low for k in ("q_proj", "k_proj", "v_proj", "o_proj",
-                                         "attn.", "self_attn")):
-            return h
+        if any(k in name for k in ("q_proj", "o_proj")):
+            primary.append(h)
+        elif any(k in name for k in ("k_proj", "v_proj")):
+            fallback.append(h)
+
+    if primary:
+        return max(primary)
+    if fallback:
+        return min(fallback)
     return 0
 
 

@@ -21,16 +21,26 @@ from copy import deepcopy
 
 
 def find_hidden_size(tensors):
-    """Find model hidden size from a square attention projection matrix."""
+    """Find model hidden size from a square attention projection matrix.
+       Prioritises q_proj / o_proj (always [hidden, hidden]).
+       Falls back to k_proj / v_proj (smaller square in GQA models)."""
+    primary = []
+    fallback = []
     for t in tensors:
+        name = t.get("name", "").lower()
         nw = t.get("num_weights", 0)
         h = int(math.isqrt(nw))
         if h * h != nw or h < 512:
             continue
-        name = t.get("name", "").lower()
-        if any(k in name for k in ("q_proj", "k_proj", "v_proj", "o_proj",
-                                     "attn.", "self_attn")):
-            return h
+        if any(k in name for k in ("q_proj", "o_proj")):
+            primary.append(h)
+        elif any(k in name for k in ("k_proj", "v_proj")):
+            fallback.append(h)
+
+    if primary:
+        return max(primary)  # largest reliable square = hidden_size
+    if fallback:
+        return min(fallback)  # k/v_proj may be smaller in GQA
     return 0
 
 
