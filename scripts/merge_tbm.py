@@ -17,6 +17,7 @@ them, and writes a unified JSON index with correct byte offsets.
 
 import argparse
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -125,12 +126,26 @@ def write_tbm(output_path: Path, tb_files: List[Dict[str, Any]],
                 file_data = tb.read()
             f.write(file_data)
 
+        # Try to read config from a source .tbm (first directory that has one)
+        config = {"num_layers": len(tensors)}
+        for input_dir in args.input:
+            src_tbm = Path(input_dir) / "model.tbm"
+            if src_tbm.is_file():
+                with open(src_tbm, "rb") as f:
+                    f.seek(-4, os.SEEK_END)
+                    src_idx_len = struct.unpack("<I", f.read(4))[0]
+                    f.seek(-4 - src_idx_len, os.SEEK_END)
+                    src_json = json.loads(f.read(src_idx_len))
+                    if "config" in src_json:
+                        config = src_json["config"]
+                    if "architecture" in src_json and src_json["architecture"]:
+                        args.architecture = src_json["architecture"]
+                    break
+
         # Build and write JSON index
         json_index = json.dumps({
-            "architecture": architecture,
-            "config": {
-                "num_layers": len(tensors),
-            },
+            "architecture": args.architecture,
+            "config": config,
             "tensors": tensors,
         }, separators=(",", ":"))
 
